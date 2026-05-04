@@ -68,12 +68,14 @@ Create account:
 }
 ```
 
+Newly created accounts receive an initial balance of `1000.00` for easier API testing.
+
 Create transaction:
 
 ```json
 {
-  "from_account": 1,
-  "to_account": 2,
+  "from_account_iban": "MB123456789012345678901234567890",
+  "to_account_iban": "MB098765432109876543210987654321",
   "amount": "25.00"
 }
 ```

@@ -33,8 +33,8 @@ class TransactionListCreateView(generics.ListCreateAPIView):
             transaction = create_transfer(
                 transfer_input=TransferInput(
                     user=request.user,
-                    from_account_id=serializer.validated_data["from_account"],
-                    to_account_id=serializer.validated_data["to_account"],
+                    from_account_iban=serializer.validated_data["from_account"].iban,
+                    to_account_iban=serializer.validated_data["to_account"].iban,
                     amount=serializer.validated_data["amount"],
                 )
             )

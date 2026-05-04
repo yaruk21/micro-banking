@@ -28,23 +28,23 @@ class TransactionValidationError(TransactionError):
 @dataclass(frozen=True)
 class TransferInput:
     user: User
-    from_account_id: int
-    to_account_id: int
+    from_account_iban: str
+    to_account_iban: str
     amount: Decimal
 
 
 def create_transfer(*, transfer_input: TransferInput) -> Transaction:
-    from_account = Account.objects.filter(id=transfer_input.from_account_id).first()
-    to_account = Account.objects.filter(id=transfer_input.to_account_id).first()
+    from_account = Account.objects.filter(iban=transfer_input.from_account_iban).first()
+    to_account = Account.objects.filter(iban=transfer_input.to_account_iban).first()
 
     if from_account is None or to_account is None:
         raise TransactionValidationError("Both accounts must exist.")
 
     if from_account.owner_id != transfer_input.user.id:
         logger.warning(
-            "Permission denied user=%s from_account=%s",
+            "Permission denied user=%s from_account_iban=%s",
             transfer_input.user.id,
-            transfer_input.from_account_id,
+            transfer_input.from_account_iban,
         )
         raise TransactionPermissionError(
             "You can transfer money only from your own accounts."

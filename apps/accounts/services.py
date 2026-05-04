@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.contrib.auth import get_user_model
 from django.utils.crypto import get_random_string
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -5,6 +7,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import Account
 
 User = get_user_model()
+INITIAL_ACCOUNT_BALANCE = Decimal("1000.00")
 
 
 def generate_iban() -> str:
@@ -19,6 +22,7 @@ def create_account_for_user(*, user: User, currency: str) -> Account:
         owner=user,
         currency=currency,
         iban=generate_iban(),
+        balance=INITIAL_ACCOUNT_BALANCE,
     )
 
 

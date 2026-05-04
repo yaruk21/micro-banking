@@ -37,7 +37,7 @@ class AccountApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(Account.objects.filter(owner=self.user).count(), 1)
-        self.assertEqual(response.data["balance"], "0.00")
+        self.assertEqual(response.data["balance"], "1000.00")
 
     def test_list_only_user_accounts(self):
         own_account = Account.objects.create(

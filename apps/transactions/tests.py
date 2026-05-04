@@ -50,8 +50,8 @@ class TransactionApiTests(APITestCase):
         response = self.client.post(
             reverse("transaction-list-create"),
             {
-                "from_account": from_account.id,
-                "to_account": to_account.id,
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
                 "amount": "25.00",
             },
             format="json",
@@ -82,8 +82,8 @@ class TransactionApiTests(APITestCase):
         response = self.client.post(
             reverse("transaction-list-create"),
             {
-                "from_account": from_account.id,
-                "to_account": to_account.id,
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
                 "amount": "25.00",
             },
             format="json",
@@ -114,8 +114,8 @@ class TransactionApiTests(APITestCase):
         response = self.client.post(
             reverse("transaction-list-create"),
             {
-                "from_account": from_account.id,
-                "to_account": to_account.id,
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
                 "amount": "10.00",
             },
             format="json",
@@ -192,8 +192,8 @@ class TransferServiceTests(TestCase):
         transfer = create_transfer(
             transfer_input=TransferInput(
                 user=self.user,
-                from_account_id=from_account.id,
-                to_account_id=to_account.id,
+                from_account_iban=from_account.iban,
+                to_account_iban=to_account.iban,
                 amount=Decimal("20.00"),
             )
         )
@@ -223,8 +223,8 @@ class TransferServiceTests(TestCase):
             create_transfer(
                 transfer_input=TransferInput(
                     user=self.user,
-                    from_account_id=from_account.id,
-                    to_account_id=to_account.id,
+                    from_account_iban=from_account.iban,
+                    to_account_iban=to_account.iban,
                     amount=Decimal("25.00"),
                 )
             )
@@ -255,8 +255,8 @@ class TransferServiceTests(TestCase):
             create_transfer(
                 transfer_input=TransferInput(
                     user=self.user,
-                    from_account_id=from_account.id,
-                    to_account_id=to_account.id,
+                    from_account_iban=from_account.iban,
+                    to_account_iban=to_account.iban,
                     amount=Decimal("15.00"),
                 )
             )
@@ -284,8 +284,8 @@ class TransferServiceTests(TestCase):
             create_transfer(
                 transfer_input=TransferInput(
                     user=self.user,
-                    from_account_id=from_account.id,
-                    to_account_id=to_account.id,
+                    from_account_iban=from_account.iban,
+                    to_account_iban=to_account.iban,
                     amount=Decimal("10.00"),
                 )
             )
@@ -304,8 +304,8 @@ class TransferServiceTests(TestCase):
             create_transfer(
                 transfer_input=TransferInput(
                     user=self.user,
-                    from_account_id=account.id,
-                    to_account_id=account.id,
+                    from_account_iban=account.iban,
+                    to_account_iban=account.iban,
                     amount=Decimal("5.00"),
                 )
             )

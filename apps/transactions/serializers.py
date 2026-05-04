@@ -2,12 +2,22 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
+from apps.accounts.models import Account
+
 from .models import Transaction
 
 
 class TransactionCreateSerializer(serializers.Serializer):
-    from_account = serializers.IntegerField()
-    to_account = serializers.IntegerField()
+    from_account_iban = serializers.SlugRelatedField(
+        queryset=Account.objects.all(),
+        slug_field="iban",
+        source="from_account",
+    )
+    to_account_iban = serializers.SlugRelatedField(
+        queryset=Account.objects.all(),
+        slug_field="iban",
+        source="to_account",
+    )
     amount = serializers.DecimalField(max_digits=18, decimal_places=2)
 
     def validate_amount(self, value: Decimal) -> Decimal:
