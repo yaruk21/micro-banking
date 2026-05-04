@@ -1,4 +1,5 @@
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -7,14 +8,24 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
+
+def env_to_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
 SECRET_KEY = os.getenv(
     "SECRET_KEY",
     "unsafe-dev-secret-key-change-me-to-a-long-random-value",
 )
-DEBUG = os.getenv("DEBUG", "0") == "1"
+DEBUG = env_to_bool("DEBUG", False)
 ALLOWED_HOSTS = [
     host.strip()
-    for host in os.getenv("ALLOWED_HOSTS", "*").split(",")
+    for host in os.getenv(
+        "ALLOWED_HOSTS",
+        "localhost,127.0.0.1,0.0.0.0",
+    ).split(",")
     if host.strip()
 ]
 
@@ -64,7 +75,9 @@ TEMPLATES = [
 WSGI_APPLICATION = "core.wsgi.application"
 ASGI_APPLICATION = "core.asgi.application"
 
-if os.getenv("USE_SQLITE", "0") == "1":
+RUNNING_PYTEST = "pytest" in Path(sys.argv[0]).name
+
+if os.getenv("USE_SQLITE", "0") == "1" or RUNNING_PYTEST:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
@@ -98,7 +111,22 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SESSION_COOKIE_SECURE = env_to_bool("SESSION_COOKIE_SECURE", not DEBUG)
+CSRF_COOKIE_SECURE = env_to_bool("CSRF_COOKIE_SECURE", not DEBUG)
+SECURE_SSL_REDIRECT = env_to_bool("SECURE_SSL_REDIRECT", False)
+CONN_MAX_AGE = int(os.getenv("CONN_MAX_AGE", "60"))
+
+DATABASES["default"]["CONN_MAX_AGE"] = CONN_MAX_AGE
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (

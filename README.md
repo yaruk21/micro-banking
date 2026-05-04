@@ -127,3 +127,55 @@ The API will be available at [http://localhost:8000](http://localhost:8000).
 
 Swagger UI will be available at
 [http://localhost:8000/api/docs/swagger/](http://localhost:8000/api/docs/swagger/).
+
+Health check:
+[http://localhost:8000/health/](http://localhost:8000/health/)
+
+## EC2 deployment
+
+This project is prepared for a simple EC2 deployment using Docker Compose.
+
+Files for EC2:
+
+- `docker-compose.ec2.yml`
+- `.env.ec2.example`
+- `deploy/entrypoint.sh`
+
+Recommended EC2 setup:
+
+1. Launch an Ubuntu EC2 instance.
+2. Open Security Group ports:
+   - `22` for SSH
+   - `80` for HTTP
+3. Install Docker and Docker Compose plugin.
+4. Clone the repository on the instance.
+5. Create the production env file:
+
+```bash
+cp .env.ec2.example .env.ec2
+```
+
+6. Update at least:
+   - `SECRET_KEY`
+   - `ALLOWED_HOSTS`
+   - `CSRF_TRUSTED_ORIGINS`
+   - `POSTGRES_PASSWORD`
+   - `DJANGO_SUPERUSER_*`
+
+7. Start the app:
+
+```bash
+docker compose -f docker-compose.ec2.yml --env-file .env.ec2 up -d --build
+```
+
+8. Verify deployment:
+
+```bash
+curl http://YOUR_EC2_PUBLIC_IP/health/
+```
+
+After deploy:
+
+- API: `http://YOUR_EC2_PUBLIC_IP/api/accounts/`
+- Swagger: `http://YOUR_EC2_PUBLIC_IP/api/docs/swagger/`
+- Admin: `http://YOUR_EC2_PUBLIC_IP/admin/`

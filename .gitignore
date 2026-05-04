@@ -3,6 +3,7 @@ venv/
 __pycache__/
 *.pyc
 .env
+.env.ec2
 db.sqlite3
 .DS_Store
 .idea/
