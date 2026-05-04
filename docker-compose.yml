@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-micro_banking}
+      POSTGRES_USER: ${POSTGRES_USER:-micro_banking}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-micro_banking}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  web:
+    build: .
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: db
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    volumes:
+      - .:/app
+
+volumes:
+  postgres_data:
