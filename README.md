@@ -30,6 +30,7 @@ Each app keeps:
 
 ## API endpoints
 
+- `POST /api/register/`
 - `POST /api/token/`
 - `POST /api/token/refresh/`
 - `GET /api/accounts/`
@@ -47,6 +48,17 @@ Transaction filters:
 - `date_to=2026-05-31`
 
 ## Example payloads
+
+Register user:
+
+```json
+{
+  "username": "alice",
+  "email": "alice@example.com",
+  "password": "StrongPass123!",
+  "password_confirm": "StrongPass123!"
+}
+```
 
 Create account:
 

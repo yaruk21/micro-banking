@@ -51,3 +51,36 @@ class AccountApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]["id"], own_account.id)
+
+    def test_register_returns_tokens(self):
+        response = self.client.post(
+            reverse("register"),
+            {
+                "username": "charlie",
+                "email": "charlie@example.com",
+                "password": "StrongPass123!",
+                "password_confirm": "StrongPass123!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
+        self.assertEqual(response.data["user"]["username"], "charlie")
+        self.assertTrue(User.objects.filter(username="charlie").exists())
+
+    def test_register_rejects_duplicate_username(self):
+        response = self.client.post(
+            reverse("register"),
+            {
+                "username": "alice",
+                "email": "alice@example.com",
+                "password": "StrongPass123!",
+                "password_confirm": "StrongPass123!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("username", response.data)

@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.utils.crypto import get_random_string
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import Account
 
@@ -19,3 +20,24 @@ def create_account_for_user(*, user: User, currency: str) -> Account:
         currency=currency,
         iban=generate_iban(),
     )
+
+
+def register_user(*, username: str, password: str, email: str = "") -> User:
+    return User.objects.create_user(
+        username=username,
+        password=password,
+        email=email,
+    )
+
+
+def build_auth_payload(*, user: User) -> dict:
+    refresh = RefreshToken.for_user(user)
+    return {
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+        },
+        "access": str(refresh.access_token),
+        "refresh": str(refresh),
+    }
