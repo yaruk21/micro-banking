@@ -2,6 +2,13 @@
 
 Clean and scalable Django REST API for user accounts and internal money transfers.
 
+## Live demo
+
+- Base URL: [http://51.21.197.200/](http://51.21.197.200/)
+- Swagger UI: [http://51.21.197.200/api/docs/swagger/](http://51.21.197.200/api/docs/swagger/)
+- OpenAPI schema: [http://51.21.197.200/api/schema/](http://51.21.197.200/api/schema/)
+- Health check: [http://51.21.197.200/health/](http://51.21.197.200/health/)
+
 ## Project structure
 
 ```text
@@ -60,6 +67,15 @@ Register user:
 }
 ```
 
+Login:
+
+```json
+{
+  "username": "alice",
+  "password": "StrongPass123!"
+}
+```
+
 Create account:
 
 ```json
@@ -79,6 +95,21 @@ Create transaction:
   "amount": "25.00"
 }
 ```
+
+## Typical flow
+
+1. Register a new user via `POST /api/register/`.
+2. Save the returned `access` and `refresh` tokens.
+3. Use `Authorization: Bearer <access_token>` for protected endpoints.
+4. Create one or more accounts with `POST /api/accounts/`.
+5. Use returned `iban` values to create transfers with `POST /api/transactions/`.
+6. Use `POST /api/token/refresh/` when the access token expires.
+
+## Notes
+
+- New accounts receive an initial balance of `1000.00` to simplify API testing.
+- Transfers are created using `from_account_iban` and `to_account_iban`.
+- Internal transfer logic still uses atomic database transactions and row locking.
 
 ## Local setup with .venv / venv
 
@@ -137,13 +168,11 @@ python manage.py runserver
 docker compose up --build
 ```
 
-The API will be available at [http://localhost:8000](http://localhost:8000).
+Local URLs:
 
-Swagger UI will be available at
-[http://localhost:8000/api/docs/swagger/](http://localhost:8000/api/docs/swagger/).
-
-Health check:
-[http://localhost:8000/health/](http://localhost:8000/health/)
+- API: [http://localhost:8000](http://localhost:8000)
+- Swagger UI: [http://localhost:8000/api/docs/swagger/](http://localhost:8000/api/docs/swagger/)
+- Health check: [http://localhost:8000/health/](http://localhost:8000/health/)
 
 ## EC2 deployment
 
@@ -193,3 +222,9 @@ After deploy:
 - API: `http://YOUR_EC2_PUBLIC_IP/api/accounts/`
 - Swagger: `http://YOUR_EC2_PUBLIC_IP/api/docs/swagger/`
 - Admin: `http://YOUR_EC2_PUBLIC_IP/admin/`
+
+Current deployed EC2 instance:
+
+- API: [http://51.21.197.200/api/accounts/](http://51.21.197.200/api/accounts/)
+- Swagger: [http://51.21.197.200/api/docs/swagger/](http://51.21.197.200/api/docs/swagger/)
+- Admin: [http://51.21.197.200/admin/](http://51.21.197.200/admin/)

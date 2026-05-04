@@ -9,11 +9,7 @@ class Transaction(models.Model):
         FAILED = "failed", "Failed"
 
     from_account = models.ForeignKey("accounts.Account", on_delete=models.PROTECT, related_name="outgoing_transactions",)
-    to_account = models.ForeignKey(
-        "accounts.Account",
-        on_delete=models.PROTECT,
-        related_name="incoming_transactions",
-    )
+    to_account = models.ForeignKey("accounts.Account",on_delete=models.PROTECT, related_name="incoming_transactions", )
     amount = models.DecimalField(max_digits=18, decimal_places=2)
     status = models.CharField(max_length=7, choices=Status.choices)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
