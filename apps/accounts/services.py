@@ -4,6 +4,8 @@ from django.contrib.auth import get_user_model
 from django.utils.crypto import get_random_string
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from core.cache_utils import bump_user_cache_version
+
 from .models import Account
 
 User = get_user_model()
@@ -18,12 +20,14 @@ def generate_iban() -> str:
 
 
 def create_account_for_user(*, user: User, currency: str) -> Account:
-    return Account.objects.create(
+    account = Account.objects.create(
         owner=user,
         currency=currency,
         iban=generate_iban(),
         balance=INITIAL_ACCOUNT_BALANCE,
     )
+    bump_user_cache_version(namespace="accounts_list", user_id=user.id)
+    return account
 
 
 def register_user(*, username: str, password: str, email: str = "") -> User:

@@ -125,6 +125,35 @@ CSRF_TRUSTED_ORIGINS = [
     for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
     if origin.strip()
 ]
+if RUNNING_PYTEST:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "micro-banking-test-cache",
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "micro-banking-cache",
+        }
+    }
+
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
+CELERY_RESULT_BACKEND = os.getenv(
+    "CELERY_RESULT_BACKEND",
+    CELERY_BROKER_URL,
+)
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_ALWAYS_EAGER = RUNNING_PYTEST or env_to_bool(
+    "CELERY_TASK_ALWAYS_EAGER",
+    False,
+)
+CELERY_TASK_EAGER_PROPAGATES = True
 
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SESSION_COOKIE_SECURE = env_to_bool("SESSION_COOKIE_SECURE", not DEBUG)
@@ -146,6 +175,19 @@ REST_FRAMEWORK = {
         "rest_framework.filters.OrderingFilter",
     ),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "10/minute",
+        "user": "50/minute",
+        "register": "5/minute",
+        "accounts_read": "60/minute",
+        "accounts_write": "20/minute",
+        "transactions_read": "60/minute",
+        "transactions_write": "20/minute",
+    },
 }
 
 SPECTACULAR_SETTINGS = {

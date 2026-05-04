@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.db import transaction as db_transaction
 
 from apps.accounts.models import Account
+from core.cache_utils import bump_user_cache_version
 
 from .models import Transaction
 
@@ -57,6 +58,10 @@ def create_transfer(*, transfer_input: TransferInput) -> Transaction:
             amount=transfer_input.amount,
             reason="Sender and recipient accounts must be different.",
         )
+        _bump_failed_transaction_caches(
+            from_account=from_account,
+            to_account=to_account,
+        )
         logger.warning(
             "Transaction failed from_account=%s to_account=%s amount=%s reason=%s",
             from_account.id,
@@ -106,11 +111,15 @@ def create_transfer(*, transfer_input: TransferInput) -> Transaction:
                 status=Transaction.Status.SUCCESS,
             )
     except TransactionValidationError as exc:
-        _create_failed_transaction(
+        failed_transaction = _create_failed_transaction(
             from_account=from_account,
             to_account=to_account,
             amount=transfer_input.amount,
             reason=str(exc),
+        )
+        _bump_failed_transaction_caches(
+            from_account=from_account,
+            to_account=to_account,
         )
         logger.warning(
             "Transaction failed from_account=%s to_account=%s amount=%s reason=%s",
@@ -127,6 +136,10 @@ def create_transfer(*, transfer_input: TransferInput) -> Transaction:
         transfer.from_account_id,
         transfer.to_account_id,
         transfer.amount,
+    )
+    _bump_transfer_related_caches(
+        from_account=transfer.from_account,
+        to_account=transfer.to_account,
     )
     return transfer
 
@@ -145,3 +158,24 @@ def _create_failed_transaction(
         status=Transaction.Status.FAILED,
         failure_reason=reason,
     )
+
+
+def _bump_transfer_related_caches(
+    *,
+    from_account: Account,
+    to_account: Account,
+) -> None:
+    affected_user_ids = {from_account.owner_id, to_account.owner_id}
+    for user_id in affected_user_ids:
+        bump_user_cache_version(namespace="accounts_list", user_id=user_id)
+        bump_user_cache_version(namespace="transactions_list", user_id=user_id)
+
+
+def _bump_failed_transaction_caches(
+    *,
+    from_account: Account,
+    to_account: Account,
+) -> None:
+    affected_user_ids = {from_account.owner_id, to_account.owner_id}
+    for user_id in affected_user_ids:
+        bump_user_cache_version(namespace="transactions_list", user_id=user_id)

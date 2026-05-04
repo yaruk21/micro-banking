@@ -1,6 +1,11 @@
+from celery import shared_task
+from django.core.cache import cache
 from rest_framework import generics, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
+
+from core.cache_utils import build_user_cache_key, get_user_cache_version
 
 from .filters import TransactionFilter
 from .selectors import list_user_transactions
@@ -16,6 +21,7 @@ from .services import (
 class TransactionListCreateView(generics.ListCreateAPIView):
     filterset_class = TransactionFilter
     ordering_fields = ("created_at", "amount")
+    throttle_classes = [ScopedRateThrottle]
 
     def get_queryset(self):
         return list_user_transactions(user=self.request.user)
@@ -25,6 +31,34 @@ class TransactionListCreateView(generics.ListCreateAPIView):
             return TransactionCreateSerializer
         return TransactionReadSerializer
 
+    def get_throttles(self):
+        self.throttle_scope = (
+            "transactions_write"
+            if self.request.method == "POST"
+            else "transactions_read"
+        )
+        return super().get_throttles()
+
+    def list(self, request, *args, **kwargs):
+        version = get_user_cache_version(
+            namespace="transactions_list",
+            user_id=request.user.id,
+        )
+        cache_key = build_user_cache_key(
+            namespace="transactions_list",
+            user_id=request.user.id,
+            version=version,
+            suffix=request.get_full_path(),
+        )
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data)
+
+        response = super().list(request, *args, **kwargs)
+        cache.set(cache_key, response.data)
+        return response
+
+    @shared_task
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)

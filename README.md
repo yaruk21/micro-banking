@@ -34,6 +34,8 @@ Each app keeps:
 - serializers stay lightweight and do not contain transfer logic
 - PostgreSQL is the primary database for both Docker and local development
 - JWT auth is provided by `djangorestframework-simplejwt`
+- Redis is connected as the Celery broker/result backend
+- Celery worker is ready for background tasks
 
 ## API endpoints
 
@@ -142,6 +144,8 @@ Update `SECRET_KEY` in `.env` before real usage.
 
 4. Make sure PostgreSQL is running locally and matches `.env` values.
 
+If you plan to use Celery outside Docker, also start Redis locally and keep it available on `127.0.0.1:6379`.
+
 If you want a quick local fallback without PostgreSQL for development checks only:
 
 ```bash
@@ -162,17 +166,32 @@ python manage.py createsuperuser
 python manage.py runserver
 ```
 
+7. Start a Celery worker in a separate terminal:
+
+```bash
+celery -A core worker -l info
+```
+
 ## Docker setup
 
 ```bash
 docker compose up --build
 ```
 
+This starts:
+
+- `web` for the Django API
+- `db` for PostgreSQL
+- `redis` for Celery broker/backend
+- `celery_worker` ready to process background tasks
+
 Local URLs:
 
 - API: [http://localhost:8000](http://localhost:8000)
 - Swagger UI: [http://localhost:8000/api/docs/swagger/](http://localhost:8000/api/docs/swagger/)
 - Health check: [http://localhost:8000/health/](http://localhost:8000/health/)
+- Redis: `localhost:6379`
+- Celery worker runs as a separate `celery_worker` service
 
 ## EC2 deployment
 
