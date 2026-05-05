@@ -55,3 +55,50 @@ def build_account_cache_key(
     suffix: str,
 ) -> str:
     return f"{namespace}:account:{account_id}:v{version}:{suffix}"
+
+
+def get_exchange_rate_cache_version(
+    *,
+    namespace: str,
+    provider: str,
+    base_currency: str,
+    quote_currency: str,
+) -> int:
+    cache_key = (
+        f"{namespace}:provider:{provider}:base:{base_currency}:quote:{quote_currency}:version"
+    )
+    version = cache.get(cache_key)
+    if version is None:
+        cache.set(cache_key, 1)
+        return 1
+    return version
+
+
+def bump_exchange_rate_cache_version(
+    *,
+    namespace: str,
+    provider: str,
+    base_currency: str,
+    quote_currency: str,
+) -> int:
+    cache_key = (
+        f"{namespace}:provider:{provider}:base:{base_currency}:quote:{quote_currency}:version"
+    )
+    try:
+        return cache.incr(cache_key)
+    except ValueError:
+        cache.set(cache_key, 2)
+        return 2
+
+
+def build_exchange_rate_cache_key(
+    *,
+    namespace: str,
+    provider: str,
+    base_currency: str,
+    quote_currency: str,
+    version: int,
+) -> str:
+    return (
+        f"{namespace}:provider:{provider}:base:{base_currency}:quote:{quote_currency}:v{version}"
+    )

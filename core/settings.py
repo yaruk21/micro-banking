@@ -152,6 +152,10 @@ else:
         }
     }
 
+EXCHANGE_RATE_CACHE_TIMEOUT_SECONDS = int(
+    os.getenv("EXCHANGE_RATE_CACHE_TIMEOUT_SECONDS", "300")
+)
+
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
 CELERY_RESULT_BACKEND = os.getenv(
     "CELERY_RESULT_BACKEND",
@@ -187,6 +191,9 @@ TRANSACTION_OUTBOX_PUBLISH_BATCH_SIZE = int(
 TRANSACTION_RECOVERY_INTERVAL_SECONDS = int(
     os.getenv("TRANSACTION_RECOVERY_INTERVAL_SECONDS", "60")
 )
+EXCHANGE_RATE_SYNC_INTERVAL_SECONDS = int(
+    os.getenv("EXCHANGE_RATE_SYNC_INTERVAL_SECONDS", "900")
+)
 CELERY_BEAT_SCHEDULE = {
     "publish-pending-transaction-outbox": {
         "task": "apps.transactions.workers.celery_tasks.publish_pending_transaction_outbox_task",
@@ -199,6 +206,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.transactions.workers.celery_tasks.recover_stuck_transfers_task",
         "schedule": TRANSACTION_RECOVERY_INTERVAL_SECONDS,
     },
+    "sync-privatbank-exchange-rates": {
+        "task": "apps.exchange.tasks.sync_privatbank_exchange_rates_task",
+        "schedule": EXCHANGE_RATE_SYNC_INTERVAL_SECONDS,
+    },
 }
 
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -209,6 +220,9 @@ CONN_MAX_AGE = int(os.getenv("CONN_MAX_AGE", "60"))
 LIST_CACHE_TIMEOUT_SECONDS = int(os.getenv("LIST_CACHE_TIMEOUT_SECONDS", "60"))
 ACCOUNT_BALANCE_CACHE_TIMEOUT_SECONDS = int(
     os.getenv("ACCOUNT_BALANCE_CACHE_TIMEOUT_SECONDS", "60")
+)
+EXCHANGE_RATE_CACHE_TIMEOUT_SECONDS = int(
+    os.getenv("EXCHANGE_RATE_CACHE_TIMEOUT_SECONDS", "300")
 )
 TRANSACTION_STUCK_THRESHOLD_SECONDS = int(
     os.getenv("TRANSACTION_STUCK_THRESHOLD_SECONDS", "300")

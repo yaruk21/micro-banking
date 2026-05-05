@@ -31,6 +31,11 @@ STRUCTURED_LOG_FIELDS = (
     "count",
     "path",
     "method",
+    "provider",
+    "base_currency",
+    "quote_currency",
+    "rate",
+    "fetched_at",
 )
 
 
