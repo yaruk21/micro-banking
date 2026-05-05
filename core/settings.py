@@ -76,9 +76,12 @@ TEMPLATES = [
 WSGI_APPLICATION = "core.wsgi.application"
 ASGI_APPLICATION = "core.asgi.application"
 
-RUNNING_PYTEST = "pytest" in Path(sys.argv[0]).name
+RUNNING_PYTEST = any("pytest" in arg for arg in sys.argv)
+RUNNING_TESTS = RUNNING_PYTEST or (
+    len(sys.argv) > 1 and sys.argv[1] == "test"
+)
 
-if os.getenv("USE_SQLITE", "0") == "1" or RUNNING_PYTEST:
+if os.getenv("USE_SQLITE", "0") == "1" or RUNNING_TESTS:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
@@ -125,7 +128,7 @@ CSRF_TRUSTED_ORIGINS = [
     for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
     if origin.strip()
 ]
-if RUNNING_PYTEST:
+if RUNNING_TESTS:
     CACHES = {
         "default": {
             "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
@@ -133,10 +136,14 @@ if RUNNING_PYTEST:
         }
     }
 else:
+    redis_cache_url = os.getenv(
+        "REDIS_CACHE_URL",
+        os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/1"),
+    )
     CACHES = {
         "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-            "LOCATION": "micro-banking-cache",
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": redis_cache_url,
         }
     }
 
@@ -149,7 +156,7 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
-CELERY_TASK_ALWAYS_EAGER = RUNNING_PYTEST or env_to_bool(
+CELERY_TASK_ALWAYS_EAGER = RUNNING_TESTS or env_to_bool(
     "CELERY_TASK_ALWAYS_EAGER",
     False,
 )

@@ -41,5 +41,20 @@ class TransactionReadSerializer(serializers.ModelSerializer):
             "amount",
             "status",
             "created_at",
+            "processing_started_at",
+            "completed_at",
+            "failure_reason",
+        )
+
+
+class TransactionStatusSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Transaction
+        fields = (
+            "id",
+            "status",
+            "created_at",
+            "processing_started_at",
+            "completed_at",
             "failure_reason",
         )

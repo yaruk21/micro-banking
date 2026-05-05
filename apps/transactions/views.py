@@ -1,7 +1,6 @@
-from celery import shared_task
 from django.core.cache import cache
 from rest_framework import generics, status
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
@@ -9,13 +8,18 @@ from core.cache_utils import build_user_cache_key, get_user_cache_version
 
 from .filters import TransactionFilter
 from .selectors import list_user_transactions
-from .serializers import TransactionCreateSerializer, TransactionReadSerializer
+from .serializers import (
+    TransactionCreateSerializer,
+    TransactionReadSerializer,
+    TransactionStatusSerializer,
+)
 from .services import (
     TransferInput,
     TransactionPermissionError,
     TransactionValidationError,
     create_transfer,
 )
+from .tasks import process_transfer_task
 
 
 class TransactionListCreateView(generics.ListCreateAPIView):
@@ -58,7 +62,6 @@ class TransactionListCreateView(generics.ListCreateAPIView):
         cache.set(cache_key, response.data)
         return response
 
-    @shared_task
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -77,5 +80,22 @@ class TransactionListCreateView(generics.ListCreateAPIView):
         except TransactionValidationError as exc:
             raise ValidationError({"detail": str(exc)}) from exc
 
+        process_transfer_task.delay(transaction.id)
         response_serializer = TransactionReadSerializer(transaction)
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
+
+
+class TransactionStatusView(generics.GenericAPIView):
+    serializer_class = TransactionStatusSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "transactions_read"
+
+    def get(self, request, *args, **kwargs):
+        transaction = list_user_transactions(user=request.user).filter(
+            id=kwargs["pk"]
+        ).first()
+        if transaction is None:
+            raise NotFound("Transaction not found.")
+
+        serializer = self.get_serializer(transaction)
+        return Response(serializer.data)
