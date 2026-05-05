@@ -26,6 +26,10 @@ Each app keeps:
 - `services.py` for business logic
 - `selectors.py` for read-side queries
 
+Architecture notes:
+
+- [docs/architecture.md](/Users/macbook/Desktop/projects/Micro-Banking%20API/docs/architecture.md)
+
 ## Main decisions
 
 - Django default `User` is enough for this scope
@@ -184,6 +188,13 @@ If you want a quick local fallback without PostgreSQL for development checks onl
 ```bash
 USE_SQLITE=1 python manage.py migrate
 USE_SQLITE=1 python manage.py runserver
+```
+
+For PostgreSQL-backed transaction integration tests that exercise real locking and
+idempotency races, keep PostgreSQL running and execute:
+
+```bash
+USE_POSTGRES_FOR_TESTS=1 ./.venv/bin/python -m pytest apps/transactions/tests/test_postgres_integration.py -q
 ```
 
 5. Run migrations and create a user:

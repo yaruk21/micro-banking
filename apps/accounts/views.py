@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.core.cache import cache
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
@@ -52,7 +53,11 @@ class AccountListCreateView(generics.ListCreateAPIView):
             return Response(cached_data)
 
         response = super().list(request, *args, **kwargs)
-        cache.set(cache_key, response.data)
+        cache.set(
+            cache_key,
+            response.data,
+            timeout=settings.LIST_CACHE_TIMEOUT_SECONDS,
+        )
         return response
 
     def create(self, request, *args, **kwargs):

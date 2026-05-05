@@ -3,8 +3,7 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from apps.accounts.models import Account
-
-from .models import Transaction
+from apps.transactions.models import Transaction
 
 
 class TransactionCreateSerializer(serializers.Serializer):

@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.core.cache import cache
 from drf_spectacular.utils import (
     OpenApiParameter,
@@ -11,22 +12,23 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from core.cache_utils import build_user_cache_key, get_user_cache_version
 
-from .filters import TransactionFilter
-from .models import Transaction
-from .selectors import list_user_transactions
-from .serializers import (
-    TransactionCreateSerializer,
-    TransactionReadSerializer,
-    TransactionStatusSerializer,
-)
-from .services import (
+from apps.transactions.application import (
     IdempotencyConflictError,
     TransferInput,
     TransactionPermissionError,
     TransactionValidationError,
     create_transfer,
 )
-from .tasks import process_transfer_task
+from apps.transactions.models import Transaction
+from apps.transactions.selectors import list_user_transactions
+from apps.transactions.workers.celery_tasks import process_transfer_task
+
+from .filters import TransactionFilter
+from .serializers import (
+    TransactionCreateSerializer,
+    TransactionReadSerializer,
+    TransactionStatusSerializer,
+)
 
 
 class TransactionListCreateView(generics.ListCreateAPIView):
@@ -70,7 +72,11 @@ class TransactionListCreateView(generics.ListCreateAPIView):
             return Response(cached_data)
 
         response = super().list(request, *args, **kwargs)
-        cache.set(cache_key, response.data)
+        cache.set(
+            cache_key,
+            response.data,
+            timeout=settings.LIST_CACHE_TIMEOUT_SECONDS,
+        )
         return response
 
     @extend_schema(
