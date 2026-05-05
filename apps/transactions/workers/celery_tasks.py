@@ -6,6 +6,9 @@ from django.conf import settings
 
 from apps.transactions.application import (
     get_stuck_transaction_ids,
+    mark_transaction_batch_failed,
+    publish_pending_transaction_outbox,
+    process_transaction_batch,
     process_transfer,
 )
 from core.logging_context import (
@@ -17,6 +20,66 @@ from core.logging_context import (
 from core.structured_logging import log_event
 
 logger = logging.getLogger("apps.transactions")
+
+
+@shared_task(bind=True)
+def publish_pending_transaction_outbox_task(self, limit: Optional[int] = None) -> int:
+    task_token = set_task_id(self.request.id)
+    try:
+        published_count = publish_pending_transaction_outbox(
+            limit=limit or settings.TRANSACTION_OUTBOX_PUBLISH_BATCH_SIZE
+        )
+        if published_count:
+            log_event(
+                logger,
+                logging.INFO,
+                "transaction.outbox_publish_scheduled",
+                message="Scheduled outbox publisher dispatched pending entries.",
+                count=published_count,
+                task_id=self.request.id,
+            )
+        return published_count
+    finally:
+        reset_task_id(task_token)
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 5},
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def process_transaction_batch_task(self, batch_id: int) -> None:
+    task_token = set_task_id(self.request.id)
+    try:
+        log_event(
+            logger,
+            logging.INFO,
+            "transaction.batch_task_started",
+            message="Transaction batch processing task started.",
+            task_id=self.request.id,
+        )
+        batch = process_transaction_batch(batch_id=batch_id)
+        log_event(
+            logger,
+            logging.INFO,
+            "transaction.batch_task_finished",
+            message="Transaction batch processing task finished.",
+            task_id=self.request.id,
+            status=batch.status,
+            count=batch.total_items,
+            succeeded_items=batch.succeeded_items,
+            failed_items=batch.failed_items,
+        )
+    except Exception as exc:
+        mark_transaction_batch_failed(batch_id=batch_id, reason=str(exc))
+        raise
+    finally:
+        reset_task_id(task_token)
 
 
 @shared_task(

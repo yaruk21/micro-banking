@@ -13,3 +13,11 @@ class TransferInput:
     to_account_iban: str
     amount: Decimal
     idempotency_key: str
+
+
+@dataclass(frozen=True)
+class BatchTransferItemInput:
+    from_account_iban: str
+    to_account_iban: str
+    amount: Decimal
+    idempotency_key: str

@@ -67,7 +67,7 @@ class RequestIdMiddlewareTests(APITestCase):
         )
         self.client.force_authenticate(user=self.user)
 
-    @patch("apps.transactions.api.views.process_transfer_task.delay")
+    @patch("apps.transactions.workers.celery_tasks.process_transfer_task.delay")
     def test_transaction_create_returns_request_id_and_propagates_it_to_worker(
         self,
         mock_delay,
@@ -86,16 +86,17 @@ class RequestIdMiddlewareTests(APITestCase):
             balance=Decimal("0.00"),
         )
 
-        response = self.client.post(
-            reverse("transaction-list-create"),
-            {
-                "from_account_iban": from_account.iban,
-                "to_account_iban": to_account.iban,
-                "amount": "10.00",
-            },
-            HTTP_IDEMPOTENCY_KEY="logging-request-id-1",
-            format="json",
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("transaction-list-create"),
+                {
+                    "from_account_iban": from_account.iban,
+                    "to_account_iban": to_account.iban,
+                    "amount": "10.00",
+                },
+                HTTP_IDEMPOTENCY_KEY="logging-request-id-1",
+                format="json",
+            )
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertIn("X-Request-ID", response)

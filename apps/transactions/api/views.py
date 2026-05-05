@@ -16,18 +16,21 @@ from core.cache_utils import build_user_cache_key, get_user_cache_version
 from core.structured_logging import log_event
 
 from apps.transactions.application import (
+    BatchTransferItemInput,
     IdempotencyConflictError,
     TransferInput,
+    create_transaction_batch,
     TransactionPermissionError,
     TransactionValidationError,
     create_transfer,
 )
-from apps.transactions.models import Transaction
+from apps.transactions.models import Transaction, TransactionBatch
 from apps.transactions.selectors import list_user_transactions
-from apps.transactions.workers.celery_tasks import process_transfer_task
 
 from .filters import TransactionFilter
 from .serializers import (
+    TransactionBatchCreateSerializer,
+    TransactionBatchReadSerializer,
     TransactionCreateSerializer,
     TransactionReadSerializer,
     TransactionStatusSerializer,
@@ -153,39 +156,6 @@ class TransactionListCreateView(generics.ListCreateAPIView):
         except TransactionValidationError as exc:
             raise ValidationError({"detail": str(exc)}) from exc
 
-        if created:
-            try:
-                async_result = process_transfer_task.delay(
-                    transaction.id,
-                    correlation_id=getattr(request, "correlation_id", None),
-                )
-            except Exception:
-                log_event(
-                    logger,
-                    logging.ERROR,
-                    "transaction.dispatch_failed",
-                    message="Failed to dispatch transaction processing task.",
-                    transaction_id=transaction.id,
-                    user_id=request.user.id,
-                    idempotency_key=transaction.idempotency_key,
-                    path=request.path,
-                    method=request.method,
-                )
-                raise
-
-            log_event(
-                logger,
-                logging.INFO,
-                "transaction.dispatched",
-                message="Transaction processing task dispatched.",
-                transaction_id=transaction.id,
-                user_id=request.user.id,
-                status=transaction.status,
-                idempotency_key=transaction.idempotency_key,
-                task_id=async_result.id,
-                path=request.path,
-                method=request.method,
-            )
         response_serializer = TransactionReadSerializer(transaction)
         response_status = (
             status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK
@@ -210,4 +180,92 @@ class TransactionStatusView(generics.GenericAPIView):
             raise NotFound("Transaction not found.")
 
         serializer = self.get_serializer(transaction)
+        return Response(serializer.data)
+
+
+class TransactionBatchCreateView(generics.GenericAPIView):
+    serializer_class = TransactionBatchCreateSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "transactions_write"
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="Idempotency-Key",
+                location=OpenApiParameter.HEADER,
+                required=True,
+                type=str,
+                description=(
+                    "Required unique key per client-side batch submission. "
+                    "Reusing the same key with the same payload returns the "
+                    "existing batch; reusing it with a different payload "
+                    "returns 409 Conflict."
+                ),
+            )
+        ],
+        responses={
+            200: TransactionBatchReadSerializer,
+            202: TransactionBatchReadSerializer,
+            400: OpenApiResponse(description="Missing or invalid Idempotency-Key."),
+            409: OpenApiResponse(
+                description="The Idempotency-Key is already used for a different batch payload."
+            ),
+        },
+        description=(
+            "Creates an asynchronous transaction batch. Validation and item processing "
+            "continue in the background."
+        ),
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+        if not idempotency_key:
+            raise ValidationError(
+                {"detail": "Idempotency-Key header is required."}
+            )
+
+        try:
+            batch, created = create_transaction_batch(
+                user=request.user,
+                idempotency_key=idempotency_key,
+                items=[
+                    BatchTransferItemInput(**item)
+                    for item in serializer.validated_data["items"]
+                ],
+            )
+        except IdempotencyConflictError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        except TransactionValidationError as exc:
+            raise ValidationError({"detail": str(exc)}) from exc
+
+        response_serializer = TransactionBatchReadSerializer(batch)
+        response_status = (
+            status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK
+        )
+        return Response(response_serializer.data, status=response_status)
+
+
+class TransactionBatchStatusView(generics.GenericAPIView):
+    serializer_class = TransactionBatchReadSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "transactions_read"
+
+    @extend_schema(
+        responses={
+            200: TransactionBatchReadSerializer,
+            404: OpenApiResponse(description="Transaction batch not found."),
+        },
+        description="Returns the current asynchronous batch processing status for polling clients.",
+    )
+    def get(self, request, *args, **kwargs):
+        batch = (
+            TransactionBatch.objects.prefetch_related("items__transaction")
+            .filter(id=kwargs["pk"], initiated_by=request.user)
+            .first()
+        )
+        if batch is None:
+            raise NotFound("Transaction batch not found.")
+
+        serializer = self.get_serializer(batch)
         return Response(serializer.data)

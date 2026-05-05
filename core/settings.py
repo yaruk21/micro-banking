@@ -170,6 +170,35 @@ CELERY_TASK_REJECT_ON_WORKER_LOST = True
 CELERY_TASK_TRACK_STARTED = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+REALTIME_REDIS_URL = os.getenv(
+    "REALTIME_REDIS_URL",
+    os.getenv(
+        "REDIS_CACHE_URL",
+        os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/1"),
+    ),
+)
+TRANSACTION_OUTBOX_PUBLISH_INTERVAL_SECONDS = int(
+    os.getenv("TRANSACTION_OUTBOX_PUBLISH_INTERVAL_SECONDS", "15")
+)
+TRANSACTION_OUTBOX_PUBLISH_BATCH_SIZE = int(
+    os.getenv("TRANSACTION_OUTBOX_PUBLISH_BATCH_SIZE", "100")
+)
+TRANSACTION_RECOVERY_INTERVAL_SECONDS = int(
+    os.getenv("TRANSACTION_RECOVERY_INTERVAL_SECONDS", "60")
+)
+CELERY_BEAT_SCHEDULE = {
+    "publish-pending-transaction-outbox": {
+        "task": "apps.transactions.workers.celery_tasks.publish_pending_transaction_outbox_task",
+        "schedule": TRANSACTION_OUTBOX_PUBLISH_INTERVAL_SECONDS,
+        "kwargs": {
+            "limit": TRANSACTION_OUTBOX_PUBLISH_BATCH_SIZE,
+        },
+    },
+    "recover-stuck-transfers": {
+        "task": "apps.transactions.workers.celery_tasks.recover_stuck_transfers_task",
+        "schedule": TRANSACTION_RECOVERY_INTERVAL_SECONDS,
+    },
+}
 
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SESSION_COOKIE_SECURE = env_to_bool("SESSION_COOKIE_SECURE", not DEBUG)

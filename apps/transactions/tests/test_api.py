@@ -31,16 +31,17 @@ class TransactionApiTests(APITestCase):
             balance=Decimal("10.00"),
         )
 
-        response = self.client.post(
-            reverse("transaction-list-create"),
-            {
-                "from_account_iban": from_account.iban,
-                "to_account_iban": to_account.iban,
-                "amount": "25.00",
-            },
-            HTTP_IDEMPOTENCY_KEY="txn-success-1",
-            format="json",
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("transaction-list-create"),
+                {
+                    "from_account_iban": from_account.iban,
+                    "to_account_iban": to_account.iban,
+                    "amount": "25.00",
+                },
+                HTTP_IDEMPOTENCY_KEY="txn-success-1",
+                format="json",
+            )
 
         from_account.refresh_from_db()
         to_account.refresh_from_db()
@@ -67,16 +68,17 @@ class TransactionApiTests(APITestCase):
             balance=Decimal("0.00"),
         )
 
-        response = self.client.post(
-            reverse("transaction-list-create"),
-            {
-                "from_account_iban": from_account.iban,
-                "to_account_iban": to_account.iban,
-                "amount": "25.00",
-            },
-            HTTP_IDEMPOTENCY_KEY="txn-failed-1",
-            format="json",
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("transaction-list-create"),
+                {
+                    "from_account_iban": from_account.iban,
+                    "to_account_iban": to_account.iban,
+                    "amount": "25.00",
+                },
+                HTTP_IDEMPOTENCY_KEY="txn-failed-1",
+                format="json",
+            )
 
         from_account.refresh_from_db()
         to_account.refresh_from_db()

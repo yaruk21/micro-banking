@@ -149,6 +149,10 @@ Possible outcomes:
 - `200 OK` when the same request is replayed with the same `Idempotency-Key`
 - `400 Bad Request` when `Idempotency-Key` is missing
 - `409 Conflict` when the same `Idempotency-Key` is reused with a different payload
+- `POST /api/transactions/batches/` for asynchronous batch submission of up to 1000 transactions
+- `GET /api/transactions/batches/{id}/status/` for batch polling
+- `GET /ws/transactions/{id}/?token=<access_token>` for realtime single-transaction status
+- `GET /ws/transaction-batches/{id}/?token=<access_token>` for realtime batch status
 
 ## Local setup with .venv / venv
 
@@ -197,6 +201,13 @@ idempotency races, keep PostgreSQL running and execute:
 USE_POSTGRES_FOR_TESTS=1 ./.venv/bin/python -m pytest apps/transactions/tests/test_postgres_integration.py -q
 ```
 
+If you need to retry accepted transactions that were persisted but not yet
+dispatched to Celery, run:
+
+```bash
+python manage.py publish_transaction_outbox
+```
+
 5. Run migrations and create a user:
 
 ```bash
@@ -228,6 +239,7 @@ This starts:
 - `db` for PostgreSQL
 - `redis` for Celery broker/backend
 - `celery_worker` ready to process background tasks
+- `celery_beat` to schedule outbox publishing and stale-transaction recovery
 
 Local URLs:
 
@@ -236,6 +248,7 @@ Local URLs:
 - Health check: [http://localhost:8000/health/](http://localhost:8000/health/)
 - Redis: `localhost:6379`
 - Celery worker runs as a separate `celery_worker` service
+- Celery Beat runs as a separate `celery_beat` service
 
 ## EC2 deployment
 

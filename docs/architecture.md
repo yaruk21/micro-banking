@@ -8,6 +8,7 @@ The application is a modular Django monolith with an asynchronous transaction pi
 - `db`: PostgreSQL as the system of record
 - `redis`: shared cache plus Celery broker/result backend
 - `celery_worker`: background processing for transaction execution and recovery jobs
+- `celery_beat`: periodic scheduling for outbox publication and stale-transaction recovery
 
 The codebase is split into:
 
@@ -18,6 +19,7 @@ The codebase is split into:
 ## Transaction Flow
 
 `POST /api/transactions/` is asynchronous and requires `Idempotency-Key`.
+`POST /api/transactions/batches/` accepts up to 1000 items and processes them asynchronously.
 
 Flow:
 
@@ -27,12 +29,28 @@ Flow:
    - `initiated_by`
    - `idempotency_key`
    - `request_fingerprint`
-4. Celery enqueues background processing.
-5. Worker moves the transaction through:
+4. A transaction outbox entry is stored in PostgreSQL in the same database transaction.
+5. After commit, the application attempts to dispatch background processing from the outbox.
+6. If broker delivery fails, the outbox row remains pending for later retry.
+7. Worker moves the transaction through:
    - `pending`
    - `processing`
    - `completed` or `failed`
-6. Clients poll `GET /api/transactions/{id}/status/`.
+8. Clients poll `GET /api/transactions/{id}/status/`.
+9. Clients can also subscribe to `ws://.../ws/transactions/{id}/` for realtime status updates.
+
+### Batch Transaction Flow
+
+`POST /api/transactions/batches/` accepts a list of item payloads plus a batch-level `Idempotency-Key`.
+
+Flow:
+
+1. API validates only the request shape, batch size, and duplicate item idempotency keys.
+2. A `TransactionBatch` plus `TransactionBatchItem` rows are stored.
+3. A Celery batch task asynchronously validates and processes each item.
+4. Each valid item reuses the normal single-transaction async flow and outbox dispatch.
+5. Clients poll `GET /api/transactions/batches/{id}/status/` for aggregate and per-item progress.
+6. Clients can also subscribe to `ws://.../ws/transaction-batches/{id}/` for realtime batch status updates.
 
 ## Reliability Guarantees Implemented
 
@@ -40,14 +58,19 @@ Flow:
   - application-level fingerprint checks
   - database unique constraint on `(initiated_by, idempotency_key)`
 - Balance mutation is wrapped in a database transaction with deterministic lock ordering.
+- Transaction acceptance and broker publication are decoupled with a PostgreSQL outbox row per accepted transaction.
 - Celery delivery is hardened with:
   - late acknowledgements
   - retry with backoff and jitter
   - `reject_on_worker_lost`
   - worker prefetch multiplier `1`
+- Pending outbox rows can be retried operationally with:
+  - management command: `python manage.py publish_transaction_outbox`
+- Pending outbox rows are also retried automatically by Celery Beat.
 - Recovery path exists for stale `pending` and `processing` transactions:
   - Celery task: `recover_stuck_transfers_task`
   - management command: `python manage.py recover_stuck_transfers`
+  - periodic scheduling via Celery Beat
 - List caches use explicit TTL to avoid unbounded Redis growth.
 - Production-style EC2 startup now uses a dedicated migration step before web and worker startup.
 
@@ -56,12 +79,12 @@ Flow:
 ### Local Docker
 
 - `web` runs a dev entrypoint that applies migrations before `runserver`
-- `celery_worker` runs independently against the same codebase and database
+- `celery_worker` and `celery_beat` run independently against the same codebase and database
 
 ### EC2 / Compose
 
 - `migrate` is a one-shot release step
-- `web` and `celery_worker` depend on successful migration completion
+- `web`, `celery_worker`, and `celery_beat` depend on successful migration completion
 - `web` only handles collectstatic, optional admin bootstrap, and Gunicorn startup
 
 ## Known Architectural Limits
@@ -71,15 +94,14 @@ These are the main remaining gaps before the system can be called banking-grade:
 1. `Account.balance` is still mutable state rather than a projection from immutable ledger entries.
 2. PostgreSQL concurrency semantics are relied on in production, but the current default test lane uses SQLite.
 3. Observability is still basic text logging rather than structured transaction event logs and traces.
-4. There is no outbox pattern yet between transaction acceptance and broker publication.
-5. Read scaling still relies on a single primary database with no replica routing or partitioning.
+4. Read scaling still relies on a single primary database with no replica routing or partitioning.
 
 ## Next Architecture Steps
 
 Recommended priority order:
 
-1. Add a PostgreSQL-backed integration test lane for idempotency and locking scenarios.
-2. Introduce structured JSON logging for transaction lifecycle events.
-3. Add Celery Beat or an external scheduler for periodic stale-transaction recovery.
-4. Design immutable ledger entries and move `Account.balance` to a derived projection.
+1. Design immutable ledger entries and move `Account.balance` to a derived projection.
+2. Add pagination for list endpoints under sustained load.
+3. Introduce fraud checks and policy-based transfer limits.
+4. Add dashboards and alerts around outbox lag, queue depth, and failed transactions.
 5. Introduce a release pipeline with explicit migrate, smoke test, and rollout phases.

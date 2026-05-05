@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from apps.accounts.models import Account
 from apps.transactions.models import Transaction
+from apps.transactions.realtime import publish_transaction_status_update
 from core.structured_logging import log_event
 
 from .cache_versions import (
@@ -52,6 +53,7 @@ def process_transfer(*, transaction_id: int) -> Transaction:
             status=transfer.status,
             idempotency_key=transfer.idempotency_key,
         )
+        publish_transaction_status_update(transaction_id=transfer.id)
 
         locked_accounts = {
             account.id: account
@@ -117,6 +119,7 @@ def process_transfer(*, transaction_id: int) -> Transaction:
         from_account=transfer.from_account,
         to_account=transfer.to_account,
     )
+    publish_transaction_status_update(transaction_id=transfer.id)
     return transfer
 
 
@@ -143,4 +146,5 @@ def _fail_transfer(*, transfer: Transaction, reason: str) -> Transaction:
         idempotency_key=transfer.idempotency_key,
         failure_reason=reason,
     )
+    publish_transaction_status_update(transaction_id=transfer.id)
     return transfer

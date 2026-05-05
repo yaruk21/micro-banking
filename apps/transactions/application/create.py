@@ -1,8 +1,9 @@
 import logging
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction as db_transaction
 
 from apps.accounts.models import Account
 from apps.transactions.models import Transaction
+from apps.transactions.realtime import publish_transaction_status_update
 from core.structured_logging import log_event
 
 from .cache_versions import bump_pending_transaction_caches
@@ -12,6 +13,10 @@ from .exceptions import (
     TransactionValidationError,
 )
 from .idempotency import build_transfer_fingerprint, validate_request_fingerprint
+from .outbox import (
+    create_transaction_outbox,
+    register_transaction_outbox_publish,
+)
 from .types import TransferInput
 
 logger = logging.getLogger("apps.transactions")
@@ -67,15 +72,18 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
         return existing_transfer, False
 
     try:
-        transfer = Transaction.objects.create(
-            initiated_by=transfer_input.user,
-            from_account=from_account,
-            to_account=to_account,
-            idempotency_key=effective_idempotency_key,
-            request_fingerprint=request_fingerprint,
-            amount=transfer_input.amount,
-            status=Transaction.Status.PENDING,
-        )
+        with db_transaction.atomic():
+            transfer = Transaction.objects.create(
+                initiated_by=transfer_input.user,
+                from_account=from_account,
+                to_account=to_account,
+                idempotency_key=effective_idempotency_key,
+                request_fingerprint=request_fingerprint,
+                amount=transfer_input.amount,
+                status=Transaction.Status.PENDING,
+            )
+            outbox = create_transaction_outbox(transaction=transfer)
+            register_transaction_outbox_publish(outbox_id=outbox.id)
     except IntegrityError:
         existing_transfer = Transaction.objects.filter(
             initiated_by=transfer_input.user,
@@ -116,6 +124,7 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
         from_account=from_account,
         to_account=to_account,
     )
+    publish_transaction_status_update(transaction_id=transfer.id)
     return transfer, True
 
 
