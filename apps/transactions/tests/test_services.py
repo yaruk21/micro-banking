@@ -293,4 +293,7 @@ class TransferServiceTests(TestCase):
         recovered_count = recover_stuck_transfers_task()
 
         self.assertEqual(recovered_count, 1)
-        mock_delay.assert_called_once_with(stale_transaction.id)
+        mock_delay.assert_called_once_with(
+            stale_transaction.id,
+            correlation_id=None,
+        )

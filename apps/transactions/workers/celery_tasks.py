@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 from celery import shared_task
 from django.conf import settings
@@ -7,11 +8,19 @@ from apps.transactions.application import (
     get_stuck_transaction_ids,
     process_transfer,
 )
+from core.logging_context import (
+    reset_correlation_id,
+    reset_task_id,
+    set_correlation_id,
+    set_task_id,
+)
+from core.structured_logging import log_event
 
 logger = logging.getLogger("apps.transactions")
 
 
 @shared_task(
+    bind=True,
     autoretry_for=(Exception,),
     retry_backoff=True,
     retry_backoff_max=60,
@@ -20,22 +29,58 @@ logger = logging.getLogger("apps.transactions")
     acks_late=True,
     reject_on_worker_lost=True,
 )
-def process_transfer_task(transaction_id: int) -> None:
-    process_transfer(transaction_id=transaction_id)
+def process_transfer_task(
+    self,
+    transaction_id: int,
+    correlation_id: Optional[str] = None,
+) -> None:
+    correlation_token = set_correlation_id(correlation_id)
+    task_token = set_task_id(self.request.id)
+    try:
+        log_event(
+            logger,
+            logging.INFO,
+            "transaction.task_started",
+            message="Transaction processing task started.",
+            transaction_id=transaction_id,
+            task_id=self.request.id,
+        )
+        transfer = process_transfer(transaction_id=transaction_id)
+        log_event(
+            logger,
+            logging.INFO,
+            "transaction.task_finished",
+            message="Transaction processing task finished.",
+            transaction_id=transaction_id,
+            task_id=self.request.id,
+            status=transfer.status,
+            idempotency_key=transfer.idempotency_key,
+        )
+    finally:
+        reset_task_id(task_token)
+        reset_correlation_id(correlation_token)
 
 
-@shared_task
-def recover_stuck_transfers_task() -> int:
+@shared_task(bind=True)
+def recover_stuck_transfers_task(self) -> int:
+    task_token = set_task_id(self.request.id)
     transaction_ids = get_stuck_transaction_ids(
         threshold_seconds=settings.TRANSACTION_STUCK_THRESHOLD_SECONDS
     )
-    for transaction_id in transaction_ids:
-        process_transfer_task.delay(transaction_id)
+    try:
+        for transaction_id in transaction_ids:
+            process_transfer_task.delay(transaction_id, correlation_id=self.request.id)
 
-    if transaction_ids:
-        logger.warning(
-            "Requeued stuck transactions count=%s ids=%s",
-            len(transaction_ids),
-            transaction_ids,
-        )
-    return len(transaction_ids)
+        if transaction_ids:
+            log_event(
+                logger,
+                logging.WARNING,
+                "transaction.requeued",
+                message="Stuck transactions were requeued for processing.",
+                transaction_ids=transaction_ids,
+                count=len(transaction_ids),
+                task_id=self.request.id,
+            )
+        return len(transaction_ids)
+    finally:
+        reset_task_id(task_token)

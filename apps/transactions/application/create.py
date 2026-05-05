@@ -3,9 +3,14 @@ from django.db import IntegrityError
 
 from apps.accounts.models import Account
 from apps.transactions.models import Transaction
+from core.structured_logging import log_event
 
 from .cache_versions import bump_pending_transaction_caches
-from .exceptions import TransactionPermissionError, TransactionValidationError
+from .exceptions import (
+    IdempotencyConflictError,
+    TransactionPermissionError,
+    TransactionValidationError,
+)
 from .idempotency import build_transfer_fingerprint, validate_request_fingerprint
 from .types import TransferInput
 
@@ -20,10 +25,13 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
         raise TransactionValidationError("Both accounts must exist.")
 
     if from_account.owner_id != transfer_input.user.id:
-        logger.warning(
-            "Permission denied user=%s from_account_iban=%s",
-            transfer_input.user.id,
-            transfer_input.from_account_iban,
+        log_event(
+            logger,
+            logging.WARNING,
+            "transaction.permission_denied",
+            message="Permission denied for transfer creation.",
+            user_id=transfer_input.user.id,
+            idempotency_key=transfer_input.idempotency_key.strip() or None,
         )
         raise TransactionPermissionError(
             "You can transfer money only from your own accounts."
@@ -44,10 +52,18 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
         idempotency_key=effective_idempotency_key,
     ).first()
     if existing_transfer is not None:
-        validate_request_fingerprint(
-            transfer=existing_transfer,
-            request_fingerprint=request_fingerprint,
-        )
+        try:
+            validate_request_fingerprint(
+                transfer=existing_transfer,
+                request_fingerprint=request_fingerprint,
+            )
+        except IdempotencyConflictError:
+            _log_idempotency_conflict(
+                transfer=existing_transfer,
+                request_fingerprint=request_fingerprint,
+            )
+            raise
+        _log_replayed_transaction(existing_transfer)
         return existing_transfer, False
 
     try:
@@ -68,21 +84,74 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
         if existing_transfer is None:
             raise
 
-        validate_request_fingerprint(
-            transfer=existing_transfer,
-            request_fingerprint=request_fingerprint,
-        )
+        try:
+            validate_request_fingerprint(
+                transfer=existing_transfer,
+                request_fingerprint=request_fingerprint,
+            )
+        except IdempotencyConflictError:
+            _log_idempotency_conflict(
+                transfer=existing_transfer,
+                request_fingerprint=request_fingerprint,
+            )
+            raise
+        _log_replayed_transaction(existing_transfer)
         return existing_transfer, False
 
-    logger.info(
-        "Transaction queued id=%s from_account=%s to_account=%s amount=%s",
-        transfer.id,
-        transfer.from_account_id,
-        transfer.to_account_id,
-        transfer.amount,
+    log_event(
+        logger,
+        logging.INFO,
+        "transaction.accepted",
+        message="Transaction accepted for asynchronous processing.",
+        transaction_id=transfer.id,
+        user_id=transfer.initiated_by_id,
+        from_account_id=transfer.from_account_id,
+        to_account_id=transfer.to_account_id,
+        amount=transfer.amount,
+        status=transfer.status,
+        idempotency_key=transfer.idempotency_key,
+        request_fingerprint=transfer.request_fingerprint,
     )
     bump_pending_transaction_caches(
         from_account=from_account,
         to_account=to_account,
     )
     return transfer, True
+
+
+def _log_idempotency_conflict(
+    *,
+    transfer: Transaction,
+    request_fingerprint: str,
+) -> None:
+    log_event(
+        logger,
+        logging.WARNING,
+        "transaction.idempotency_conflict",
+        message="Idempotency key reused with a different payload.",
+        transaction_id=transfer.id,
+        user_id=transfer.initiated_by_id,
+        from_account_id=transfer.from_account_id,
+        to_account_id=transfer.to_account_id,
+        amount=transfer.amount,
+        status=transfer.status,
+        idempotency_key=transfer.idempotency_key,
+        request_fingerprint=request_fingerprint,
+    )
+
+
+def _log_replayed_transaction(transfer: Transaction) -> None:
+    log_event(
+        logger,
+        logging.INFO,
+        "transaction.replayed",
+        message="Existing transaction returned for the same idempotency key.",
+        transaction_id=transfer.id,
+        user_id=transfer.initiated_by_id,
+        from_account_id=transfer.from_account_id,
+        to_account_id=transfer.to_account_id,
+        amount=transfer.amount,
+        status=transfer.status,
+        idempotency_key=transfer.idempotency_key,
+        request_fingerprint=transfer.request_fingerprint,
+    )

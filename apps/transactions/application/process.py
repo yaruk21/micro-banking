@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from apps.accounts.models import Account
 from apps.transactions.models import Transaction
+from core.structured_logging import log_event
 
 from .cache_versions import (
     bump_failed_transaction_caches,
@@ -37,6 +38,19 @@ def process_transfer(*, transaction_id: int) -> Transaction:
         transfer.failure_reason = ""
         transfer.save(
             update_fields=["status", "processing_started_at", "failure_reason"]
+        )
+        log_event(
+            logger,
+            logging.INFO,
+            "transaction.processing_started",
+            message="Transaction processing started.",
+            transaction_id=transfer.id,
+            user_id=transfer.initiated_by_id,
+            from_account_id=transfer.from_account_id,
+            to_account_id=transfer.to_account_id,
+            amount=transfer.amount,
+            status=transfer.status,
+            idempotency_key=transfer.idempotency_key,
         )
 
         locked_accounts = {
@@ -86,12 +100,18 @@ def process_transfer(*, transaction_id: int) -> Transaction:
         transfer.failure_reason = ""
         transfer.save(update_fields=["status", "completed_at", "failure_reason"])
 
-    logger.info(
-        "Transaction completed id=%s from_account=%s to_account=%s amount=%s",
-        transfer.id,
-        transfer.from_account_id,
-        transfer.to_account_id,
-        transfer.amount,
+    log_event(
+        logger,
+        logging.INFO,
+        "transaction.completed",
+        message="Transaction completed successfully.",
+        transaction_id=transfer.id,
+        user_id=transfer.initiated_by_id,
+        from_account_id=transfer.from_account_id,
+        to_account_id=transfer.to_account_id,
+        amount=transfer.amount,
+        status=transfer.status,
+        idempotency_key=transfer.idempotency_key,
     )
     bump_transfer_related_caches(
         from_account=transfer.from_account,
@@ -109,12 +129,18 @@ def _fail_transfer(*, transfer: Transaction, reason: str) -> Transaction:
         from_account=transfer.from_account,
         to_account=transfer.to_account,
     )
-    logger.warning(
-        "Transaction failed id=%s from_account=%s to_account=%s amount=%s reason=%s",
-        transfer.id,
-        transfer.from_account_id,
-        transfer.to_account_id,
-        transfer.amount,
-        reason,
+    log_event(
+        logger,
+        logging.WARNING,
+        "transaction.failed",
+        message="Transaction processing failed.",
+        transaction_id=transfer.id,
+        user_id=transfer.initiated_by_id,
+        from_account_id=transfer.from_account_id,
+        to_account_id=transfer.to_account_id,
+        amount=transfer.amount,
+        status=transfer.status,
+        idempotency_key=transfer.idempotency_key,
+        failure_reason=reason,
     )
     return transfer

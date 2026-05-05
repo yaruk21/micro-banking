@@ -1,3 +1,5 @@
+import logging
+
 from django.conf import settings
 from django.core.cache import cache
 from drf_spectacular.utils import (
@@ -11,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
 from core.cache_utils import build_user_cache_key, get_user_cache_version
+from core.structured_logging import log_event
 
 from apps.transactions.application import (
     IdempotencyConflictError,
@@ -29,6 +32,8 @@ from .serializers import (
     TransactionReadSerializer,
     TransactionStatusSerializer,
 )
+
+logger = logging.getLogger("apps.transactions")
 
 
 class TransactionListCreateView(generics.ListCreateAPIView):
@@ -134,12 +139,53 @@ class TransactionListCreateView(generics.ListCreateAPIView):
         except TransactionPermissionError as exc:
             raise PermissionDenied(str(exc)) from exc
         except IdempotencyConflictError as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "transaction.response_conflict",
+                message="Returning conflict response for idempotency key reuse.",
+                user_id=request.user.id,
+                idempotency_key=idempotency_key,
+                path=request.path,
+                method=request.method,
+            )
             return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
         except TransactionValidationError as exc:
             raise ValidationError({"detail": str(exc)}) from exc
 
         if created:
-            process_transfer_task.delay(transaction.id)
+            try:
+                async_result = process_transfer_task.delay(
+                    transaction.id,
+                    correlation_id=getattr(request, "correlation_id", None),
+                )
+            except Exception:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "transaction.dispatch_failed",
+                    message="Failed to dispatch transaction processing task.",
+                    transaction_id=transaction.id,
+                    user_id=request.user.id,
+                    idempotency_key=transaction.idempotency_key,
+                    path=request.path,
+                    method=request.method,
+                )
+                raise
+
+            log_event(
+                logger,
+                logging.INFO,
+                "transaction.dispatched",
+                message="Transaction processing task dispatched.",
+                transaction_id=transaction.id,
+                user_id=request.user.id,
+                status=transaction.status,
+                idempotency_key=transaction.idempotency_key,
+                task_id=async_result.id,
+                path=request.path,
+                method=request.method,
+            )
         response_serializer = TransactionReadSerializer(transaction)
         response_status = (
             status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK
