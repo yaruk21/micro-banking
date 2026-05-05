@@ -116,8 +116,8 @@ def process_transfer(*, transaction_id: int) -> Transaction:
         idempotency_key=transfer.idempotency_key,
     )
     bump_transfer_related_caches(
-        from_account=transfer.from_account,
-        to_account=transfer.to_account,
+        from_account=locked_from_account,
+        to_account=locked_to_account,
     )
     publish_transaction_status_update(transaction_id=transfer.id)
     return transfer

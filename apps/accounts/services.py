@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 from django.utils.crypto import get_random_string
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from .cache import refresh_account_balance_cache
 from core.cache_utils import bump_user_cache_version
 
 from .models import Account
@@ -26,6 +27,7 @@ def create_account_for_user(*, user: User, currency: str) -> Account:
         iban=generate_iban(),
         balance=INITIAL_ACCOUNT_BALANCE,
     )
+    refresh_account_balance_cache(account=account)
     bump_user_cache_version(namespace="accounts_list", user_id=user.id)
     return account
 

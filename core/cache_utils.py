@@ -27,3 +27,31 @@ def build_user_cache_key(
     suffix: str,
 ) -> str:
     return f"{namespace}:user:{user_id}:v{version}:{suffix}"
+
+
+def get_account_cache_version(*, namespace: str, account_id: int) -> int:
+    cache_key = f"{namespace}:account:{account_id}:version"
+    version = cache.get(cache_key)
+    if version is None:
+        cache.set(cache_key, 1)
+        return 1
+    return version
+
+
+def bump_account_cache_version(*, namespace: str, account_id: int) -> int:
+    cache_key = f"{namespace}:account:{account_id}:version"
+    try:
+        return cache.incr(cache_key)
+    except ValueError:
+        cache.set(cache_key, 2)
+        return 2
+
+
+def build_account_cache_key(
+    *,
+    namespace: str,
+    account_id: int,
+    version: int,
+    suffix: str,
+) -> str:
+    return f"{namespace}:account:{account_id}:v{version}:{suffix}"

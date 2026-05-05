@@ -27,3 +27,9 @@ class Account(models.Model):
 
     def __str__(self) -> str:
         return f"{self.iban} ({self.currency})"
+
+    @property
+    def cached_balance(self) -> Decimal:
+        from .cache import get_cached_account_balance
+
+        return get_cached_account_balance(account=self)

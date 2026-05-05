@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "apps.accounts",
     "apps.transactions",
+    "apps.exchange",
 ]
 
 MIDDLEWARE = [
@@ -206,6 +207,9 @@ CSRF_COOKIE_SECURE = env_to_bool("CSRF_COOKIE_SECURE", not DEBUG)
 SECURE_SSL_REDIRECT = env_to_bool("SECURE_SSL_REDIRECT", False)
 CONN_MAX_AGE = int(os.getenv("CONN_MAX_AGE", "60"))
 LIST_CACHE_TIMEOUT_SECONDS = int(os.getenv("LIST_CACHE_TIMEOUT_SECONDS", "60"))
+ACCOUNT_BALANCE_CACHE_TIMEOUT_SECONDS = int(
+    os.getenv("ACCOUNT_BALANCE_CACHE_TIMEOUT_SECONDS", "60")
+)
 TRANSACTION_STUCK_THRESHOLD_SECONDS = int(
     os.getenv("TRANSACTION_STUCK_THRESHOLD_SECONDS", "300")
 )

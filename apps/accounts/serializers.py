@@ -12,6 +12,13 @@ class AccountCreateSerializer(serializers.Serializer):
 
 
 class AccountReadSerializer(serializers.ModelSerializer):
+    balance = serializers.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        read_only=True,
+        source="cached_balance",
+    )
+
     class Meta:
         model = Account
         fields = ("id", "iban", "balance", "currency", "created_at")
