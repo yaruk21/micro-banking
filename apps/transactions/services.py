@@ -1,9 +1,10 @@
+import hashlib
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
-from django.db import transaction as db_transaction
+from django.db import IntegrityError, transaction as db_transaction
 from django.utils import timezone
 
 from apps.accounts.models import Account
@@ -27,15 +28,20 @@ class TransactionValidationError(TransactionError):
     pass
 
 
+class IdempotencyConflictError(TransactionError):
+    pass
+
+
 @dataclass(frozen=True)
 class TransferInput:
     user: User
     from_account_iban: str
     to_account_iban: str
     amount: Decimal
+    idempotency_key: str
 
 
-def create_transfer(*, transfer_input: TransferInput) -> Transaction:
+def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool]:
     from_account = Account.objects.filter(iban=transfer_input.from_account_iban).first()
     to_account = Account.objects.filter(iban=transfer_input.to_account_iban).first()
 
@@ -52,12 +58,51 @@ def create_transfer(*, transfer_input: TransferInput) -> Transaction:
             "You can transfer money only from your own accounts."
         )
 
-    transfer = Transaction.objects.create(
-        from_account=from_account,
-        to_account=to_account,
+    if not transfer_input.idempotency_key.strip():
+        raise TransactionValidationError("Idempotency-Key header is required.")
+
+    effective_idempotency_key = transfer_input.idempotency_key.strip()
+    request_fingerprint = _build_transfer_fingerprint(
+        from_account_iban=from_account.iban,
+        to_account_iban=to_account.iban,
         amount=transfer_input.amount,
-        status=Transaction.Status.PENDING,
     )
+
+    existing_transfer = Transaction.objects.filter(
+        initiated_by=transfer_input.user,
+        idempotency_key=effective_idempotency_key,
+    ).first()
+    if existing_transfer is not None:
+        _validate_request_fingerprint(
+            transfer=existing_transfer,
+            request_fingerprint=request_fingerprint,
+        )
+        return existing_transfer, False
+
+    try:
+        transfer = Transaction.objects.create(
+            initiated_by=transfer_input.user,
+            from_account=from_account,
+            to_account=to_account,
+            idempotency_key=effective_idempotency_key,
+            request_fingerprint=request_fingerprint,
+            amount=transfer_input.amount,
+            status=Transaction.Status.PENDING,
+        )
+    except IntegrityError:
+        existing_transfer = Transaction.objects.filter(
+            initiated_by=transfer_input.user,
+            idempotency_key=effective_idempotency_key,
+        ).first()
+        if existing_transfer is None:
+            raise
+
+        _validate_request_fingerprint(
+            transfer=existing_transfer,
+            request_fingerprint=request_fingerprint,
+        )
+        return existing_transfer, False
+
     logger.info(
         "Transaction queued id=%s from_account=%s to_account=%s amount=%s",
         transfer.id,
@@ -69,7 +114,7 @@ def create_transfer(*, transfer_input: TransferInput) -> Transaction:
         from_account=from_account,
         to_account=to_account,
     )
-    return transfer
+    return transfer, True
 
 
 def process_transfer(*, transaction_id: int) -> Transaction:
@@ -206,3 +251,25 @@ def _bump_failed_transaction_caches(
     affected_user_ids = {from_account.owner_id, to_account.owner_id}
     for user_id in affected_user_ids:
         bump_user_cache_version(namespace="transactions_list", user_id=user_id)
+
+
+def _build_transfer_fingerprint(
+    *,
+    from_account_iban: str,
+    to_account_iban: str,
+    amount: Decimal,
+) -> str:
+    normalized_amount = format(amount.quantize(Decimal("0.01")), "f")
+    raw_value = f"{from_account_iban}:{to_account_iban}:{normalized_amount}"
+    return hashlib.sha256(raw_value.encode("utf-8")).hexdigest()
+
+
+def _validate_request_fingerprint(
+    *,
+    transfer: Transaction,
+    request_fingerprint: str,
+) -> None:
+    if transfer.request_fingerprint != request_fingerprint:
+        raise IdempotencyConflictError(
+            "This Idempotency-Key is already used for a different transaction payload."
+        )

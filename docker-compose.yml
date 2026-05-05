@@ -20,7 +20,7 @@ services:
   web:
     build: .
     restart: unless-stopped
-    command: python manage.py runserver 0.0.0.0:8000
+    command: sh /app/deploy/dev-entrypoint.sh
     env_file:
       - .env
     environment:

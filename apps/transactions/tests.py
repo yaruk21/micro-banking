@@ -54,6 +54,7 @@ class TransactionApiTests(APITestCase):
                 "to_account_iban": to_account.iban,
                 "amount": "25.00",
             },
+            HTTP_IDEMPOTENCY_KEY="txn-success-1",
             format="json",
         )
 
@@ -89,6 +90,7 @@ class TransactionApiTests(APITestCase):
                 "to_account_iban": to_account.iban,
                 "amount": "25.00",
             },
+            HTTP_IDEMPOTENCY_KEY="txn-failed-1",
             format="json",
         )
 
@@ -121,10 +123,42 @@ class TransactionApiTests(APITestCase):
                 "to_account_iban": to_account.iban,
                 "amount": "10.00",
             },
+            HTTP_IDEMPOTENCY_KEY="txn-forbidden-1",
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_transfer_requires_idempotency_key_header(self):
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000035",
+            currency=Account.Currency.USD,
+            balance=Decimal("50.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000036",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+
+        response = self.client.post(
+            reverse("transaction-list-create"),
+            {
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
+                "amount": "10.00",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Idempotency-Key header is required.",
+        )
         self.assertEqual(Transaction.objects.count(), 0)
 
     def test_transaction_list_filter_by_account(self):
@@ -148,14 +182,20 @@ class TransactionApiTests(APITestCase):
         )
 
         first_transaction = Transaction.objects.create(
+            initiated_by=self.user,
             from_account=first_account,
             to_account=recipient,
+            idempotency_key="list-filter-1",
+            request_fingerprint="fingerprint-list-filter-1",
             amount=Decimal("10.00"),
             status=Transaction.Status.COMPLETED,
         )
         Transaction.objects.create(
+            initiated_by=self.user,
             from_account=second_account,
             to_account=recipient,
+            idempotency_key="list-filter-2",
+            request_fingerprint="fingerprint-list-filter-2",
             amount=Decimal("15.00"),
             status=Transaction.Status.COMPLETED,
         )
@@ -184,8 +224,11 @@ class TransactionApiTests(APITestCase):
         )
 
         transaction = Transaction.objects.create(
+            initiated_by=self.user,
             from_account=from_account,
             to_account=to_account,
+            idempotency_key="status-view-1",
+            request_fingerprint="fingerprint-status-view-1",
             amount=Decimal("25.00"),
             status=Transaction.Status.PENDING,
         )
@@ -197,6 +240,83 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["id"], transaction.id)
         self.assertEqual(response.data["status"], Transaction.Status.PENDING)
+
+    def test_same_idempotency_key_returns_existing_transaction(self):
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000061",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000062",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+
+        payload = {
+            "from_account_iban": from_account.iban,
+            "to_account_iban": to_account.iban,
+            "amount": "25.00",
+        }
+
+        first_response = self.client.post(
+            reverse("transaction-list-create"),
+            payload,
+            HTTP_IDEMPOTENCY_KEY="replay-key-1",
+            format="json",
+        )
+        second_response = self.client.post(
+            reverse("transaction-list-create"),
+            payload,
+            HTTP_IDEMPOTENCY_KEY="replay-key-1",
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Transaction.objects.count(), 1)
+        self.assertEqual(first_response.data["id"], second_response.data["id"])
+
+    def test_same_idempotency_key_with_different_payload_returns_conflict(self):
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000071",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000072",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+
+        first_response = self.client.post(
+            reverse("transaction-list-create"),
+            {
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
+                "amount": "25.00",
+            },
+            HTTP_IDEMPOTENCY_KEY="replay-key-2",
+            format="json",
+        )
+        second_response = self.client.post(
+            reverse("transaction-list-create"),
+            {
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
+                "amount": "30.00",
+            },
+            HTTP_IDEMPOTENCY_KEY="replay-key-2",
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(second_response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(Transaction.objects.count(), 1)
 
 
 class TransferServiceTests(TestCase):
@@ -221,14 +341,16 @@ class TransferServiceTests(TestCase):
             balance=Decimal("30.00"),
         )
 
-        transfer = create_transfer(
+        transfer, created = create_transfer(
             transfer_input=TransferInput(
                 user=self.user,
                 from_account_iban=from_account.iban,
                 to_account_iban=to_account.iban,
                 amount=Decimal("20.00"),
+                idempotency_key="service-success-1",
             )
         )
+        self.assertTrue(created)
         process_transfer(transaction_id=transfer.id)
 
         from_account.refresh_from_db()
@@ -253,14 +375,16 @@ class TransferServiceTests(TestCase):
             balance=Decimal("40.00"),
         )
 
-        transfer = create_transfer(
+        transfer, created = create_transfer(
             transfer_input=TransferInput(
                 user=self.user,
                 from_account_iban=from_account.iban,
                 to_account_iban=to_account.iban,
                 amount=Decimal("25.00"),
+                idempotency_key="service-failed-1",
             )
         )
+        self.assertTrue(created)
         process_transfer(transaction_id=transfer.id)
         from_account.refresh_from_db()
         to_account.refresh_from_db()
@@ -285,14 +409,16 @@ class TransferServiceTests(TestCase):
             balance=Decimal("10.00"),
         )
 
-        transfer = create_transfer(
+        transfer, created = create_transfer(
             transfer_input=TransferInput(
                 user=self.user,
                 from_account_iban=from_account.iban,
                 to_account_iban=to_account.iban,
                 amount=Decimal("15.00"),
+                idempotency_key="service-failed-2",
             )
         )
+        self.assertTrue(created)
         process_transfer(transaction_id=transfer.id)
         transfer.refresh_from_db()
         self.assertEqual(Transaction.objects.count(), 1)
@@ -320,6 +446,7 @@ class TransferServiceTests(TestCase):
                     from_account_iban=from_account.iban,
                     to_account_iban=to_account.iban,
                     amount=Decimal("10.00"),
+                    idempotency_key="service-forbidden-1",
                 )
             )
 
@@ -333,14 +460,16 @@ class TransferServiceTests(TestCase):
             balance=Decimal("70.00"),
         )
 
-        transfer = create_transfer(
+        transfer, created = create_transfer(
             transfer_input=TransferInput(
                 user=self.user,
                 from_account_iban=account.iban,
                 to_account_iban=account.iban,
                 amount=Decimal("5.00"),
+                idempotency_key="service-same-account-1",
             )
         )
+        self.assertTrue(created)
         process_transfer(transaction_id=transfer.id)
         account.refresh_from_db()
         transfer.refresh_from_db()
@@ -349,3 +478,41 @@ class TransferServiceTests(TestCase):
         self.assertEqual(Transaction.objects.count(), 1)
         self.assertEqual(transfer.status, Transaction.Status.FAILED)
         self.assertIn("must be different", transfer.failure_reason)
+
+    def test_create_transfer_reuses_existing_transaction_for_same_idempotency_key(self):
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000061",
+            currency=Account.Currency.USD,
+            balance=Decimal("80.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000062",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+
+        first_transfer, first_created = create_transfer(
+            transfer_input=TransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                to_account_iban=to_account.iban,
+                amount=Decimal("10.00"),
+                idempotency_key="service-replay-1",
+            )
+        )
+        second_transfer, second_created = create_transfer(
+            transfer_input=TransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                to_account_iban=to_account.iban,
+                amount=Decimal("10.00"),
+                idempotency_key="service-replay-1",
+            )
+        )
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first_transfer.id, second_transfer.id)
+        self.assertEqual(Transaction.objects.count(), 1)

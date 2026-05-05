@@ -46,6 +46,7 @@ Each app keeps:
 - `POST /api/accounts/`
 - `GET /api/transactions/`
 - `POST /api/transactions/`
+- `GET /api/transactions/<id>/status/`
 - `GET /api/schema/`
 - `GET /api/docs/swagger/`
 - `GET /api/docs/redoc/`
@@ -98,20 +99,52 @@ Create transaction:
 }
 ```
 
+Required header for transaction creation:
+
+```text
+Idempotency-Key: transfer-001
+```
+
 ## Typical flow
 
 1. Register a new user via `POST /api/register/`.
 2. Save the returned `access` and `refresh` tokens.
 3. Use `Authorization: Bearer <access_token>` for protected endpoints.
 4. Create one or more accounts with `POST /api/accounts/`.
-5. Use returned `iban` values to create transfers with `POST /api/transactions/`.
-6. Use `POST /api/token/refresh/` when the access token expires.
+5. Use returned `iban` values to create transfers with `POST /api/transactions/` and a required `Idempotency-Key` header.
+6. Poll `GET /api/transactions/<id>/status/` until the status becomes `completed` or `failed`.
+7. Use `POST /api/token/refresh/` when the access token expires.
 
 ## Notes
 
 - New accounts receive an initial balance of `1000.00` to simplify API testing.
 - Transfers are created using `from_account_iban` and `to_account_iban`.
+- Transaction creation is asynchronous and returns `202 Accepted` for a new transfer.
+- Repeating the same request with the same `Idempotency-Key` returns the existing transaction with `200 OK`.
+- Reusing the same `Idempotency-Key` with a different payload returns `409 Conflict`.
+- `Idempotency-Key` is required for `POST /api/transactions/`.
 - Internal transfer logic still uses atomic database transactions and row locking.
+
+## Transaction creation example
+
+```bash
+curl -X POST http://localhost:8000/api/transactions/ \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: transfer-001" \
+  -d '{
+    "from_account_iban": "MB123456789012345678901234567890",
+    "to_account_iban": "MB098765432109876543210987654321",
+    "amount": "25.00"
+  }'
+```
+
+Possible outcomes:
+
+- `202 Accepted` for a newly queued transfer
+- `200 OK` when the same request is replayed with the same `Idempotency-Key`
+- `400 Bad Request` when `Idempotency-Key` is missing
+- `409 Conflict` when the same `Idempotency-Key` is reused with a different payload
 
 ## Local setup with .venv / venv
 

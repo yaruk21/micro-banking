@@ -5,6 +5,7 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from core.cache_utils import build_user_cache_key, get_user_cache_version
 
+from .models import Account
 from .selectors import list_user_accounts
 from .serializers import (
     AccountCreateSerializer,
@@ -16,7 +17,12 @@ from .services import build_auth_payload, create_account_for_user, register_user
 
 class AccountListCreateView(generics.ListCreateAPIView):
     throttle_classes = [ScopedRateThrottle]
+
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return Account.objects.none()
+        if not self.request.user.is_authenticated:
+            return Account.objects.none()
         return list_user_accounts(user=self.request.user)
 
     def get_serializer_class(self):
