@@ -11,7 +11,13 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import Account
 from apps.accounts.services import SYSTEM_ACCOUNT_USERNAME
 from apps.exchange.models import ExchangeRate
-from apps.transactions.models import SwiftTransferDetails, Transaction, TransactionOutbox
+from apps.transactions.models import (
+    FraudEvent,
+    SwiftTransferDetails,
+    Transaction,
+    TransactionChallenge,
+    TransactionOutbox,
+)
 from apps.transactions.selectors import list_user_transactions
 
 User = get_user_model()
@@ -165,6 +171,271 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(from_account.balance, Decimal("5.00"))
         self.assertEqual(to_account.balance, Decimal("0.00"))
         self.assertEqual(Transaction.objects.get().status, Transaction.Status.FAILED)
+
+    @override_settings(
+        TRANSACTION_2FA_CHALLENGE_AMOUNT=Decimal("30.00"),
+        TRANSACTION_2FA_EXPOSE_CHALLENGE_CODE=True,
+    )
+    def test_large_transfer_requires_2fa_and_confirm_endpoint_resumes_processing(self):
+        """API should keep large transfers pending until the 2FA challenge is confirmed."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000025",
+            currency=Account.Currency.USD,
+            balance=Decimal("120.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000026",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+
+        response = self.client.post(
+            reverse("transaction-list-create"),
+            {
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
+                "amount": "40.00",
+            },
+            HTTP_IDEMPOTENCY_KEY="txn-2fa-large-1",
+            format="json",
+        )
+
+        transaction = Transaction.objects.get()
+        challenge = TransactionChallenge.objects.get(transaction=transaction)
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(transaction.status, Transaction.Status.PENDING)
+        self.assertEqual(TransactionOutbox.objects.count(), 0)
+        self.assertTrue(response.data["requires_2fa"])
+        self.assertEqual(response.data["challenge"]["status"], TransactionChallenge.Status.PENDING)
+        self.assertTrue(response.data["challenge"]["debug_code"])
+
+        with self.captureOnCommitCallbacks(execute=True):
+            confirm_response = self.client.post(
+                reverse("transaction-challenge-confirm", kwargs={"pk": transaction.id}),
+                {"code": response.data["challenge"]["debug_code"]},
+                format="json",
+            )
+
+        transaction.refresh_from_db()
+        challenge.refresh_from_db()
+        from_account.refresh_from_db()
+        to_account.refresh_from_db()
+
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(challenge.status, TransactionChallenge.Status.VERIFIED)
+        self.assertEqual(transaction.status, Transaction.Status.COMPLETED)
+        self.assertEqual(TransactionOutbox.objects.count(), 1)
+        self.assertEqual(from_account.balance, Decimal("80.00"))
+        self.assertEqual(to_account.balance, Decimal("50.00"))
+
+    @override_settings(
+        FRAUD_FREQUENCY_WINDOW_SECONDS=60,
+        FRAUD_FREQUENCY_MAX_ATTEMPTS=2,
+        FRAUD_FREQUENCY_ACTION="block",
+    )
+    def test_transfer_returns_bad_request_when_behavioral_frequency_rule_blocks(self):
+        """API should reject suspicious transaction bursts via fraud rules."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000027",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000028",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+        FraudEvent.objects.create(
+            user=self.user,
+            event_type=FraudEvent.EventType.TRANSACTION_ATTEMPT,
+            outcome=FraudEvent.Outcome.ALLOWED,
+            request_id="api-fraud-prior-1",
+        )
+        FraudEvent.objects.create(
+            user=self.user,
+            event_type=FraudEvent.EventType.TRANSACTION_ATTEMPT,
+            outcome=FraudEvent.Outcome.ALLOWED,
+            request_id="api-fraud-prior-2",
+        )
+
+        response = self.client.post(
+            reverse("transaction-list-create"),
+            {
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
+                "amount": "25.00",
+            },
+            HTTP_IDEMPOTENCY_KEY="txn-fraud-block-1",
+            HTTP_X_COUNTRY_CODE="UA",
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Transaction was blocked by behavioral fraud checks.",
+        )
+        self.assertEqual(Transaction.objects.count(), 0)
+        self.assertEqual(FraudEvent.objects.count(), 3)
+
+    @override_settings(
+        FRAUD_AMOUNT_BASELINE_MIN_TRANSACTIONS=3,
+        FRAUD_AMOUNT_ANOMALY_MULTIPLIER=Decimal("2.50"),
+        FRAUD_AMOUNT_ACTION="block",
+    )
+    def test_transfer_returns_bad_request_when_amount_anomaly_rule_blocks(self):
+        """API should reject anomalously large amounts when fraud rule is blocking."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000037",
+            currency=Account.Currency.USD,
+            balance=Decimal("500.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000038",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+        for index, historical_amount in enumerate(("10.00", "12.00", "14.00"), start=1):
+            Transaction.objects.create(
+                initiated_by=self.user,
+                from_account=from_account,
+                to_account=to_account,
+                idempotency_key=f"api-amount-block-existing-{index}",
+                request_fingerprint=f"api-amount-block-existing-{index}",
+                amount=Decimal(historical_amount),
+                status=Transaction.Status.COMPLETED,
+                transfer_type=Transaction.TransferType.INTERNAL,
+            )
+
+        response = self.client.post(
+            reverse("transaction-list-create"),
+            {
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
+                "amount": "40.00",
+            },
+            HTTP_IDEMPOTENCY_KEY="txn-fraud-amount-block-1",
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Transaction was blocked by behavioral fraud checks.",
+        )
+        self.assertEqual(Transaction.objects.count(), 3)
+        self.assertEqual(
+            FraudEvent.objects.latest("id").outcome,
+            FraudEvent.Outcome.BLOCKED,
+        )
+
+    @override_settings(
+        FRAUD_AMOUNT_BASELINE_MIN_TRANSACTIONS=3,
+        FRAUD_AMOUNT_ANOMALY_MULTIPLIER=Decimal("2.50"),
+        FRAUD_AMOUNT_ACTION="flag",
+    )
+    def test_transfer_persists_flagged_fraud_event_for_amount_anomaly(self):
+        """API should persist a flagged fraud event for unusually large amounts."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000039",
+            currency=Account.Currency.USD,
+            balance=Decimal("500.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000040",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+        for index, historical_amount in enumerate(("10.00", "12.00", "14.00"), start=1):
+            Transaction.objects.create(
+                initiated_by=self.user,
+                from_account=from_account,
+                to_account=to_account,
+                idempotency_key=f"api-amount-flag-existing-{index}",
+                request_fingerprint=f"api-amount-flag-existing-{index}",
+                amount=Decimal(historical_amount),
+                status=Transaction.Status.COMPLETED,
+                transfer_type=Transaction.TransferType.INTERNAL,
+            )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("transaction-list-create"),
+                {
+                    "from_account_iban": from_account.iban,
+                    "to_account_iban": to_account.iban,
+                    "amount": "40.00",
+                },
+                HTTP_IDEMPOTENCY_KEY="txn-fraud-amount-flag-1",
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        fraud_event = FraudEvent.objects.latest("id")
+        self.assertEqual(fraud_event.outcome, FraudEvent.Outcome.FLAGGED)
+        self.assertEqual(fraud_event.transaction_id, response.data["id"])
+
+    @override_settings(
+        FRAUD_GEO_COUNTRY_CHANGE_WINDOW_SECONDS=7200,
+        FRAUD_GEO_ACTION="flag",
+    )
+    def test_transfer_persists_flagged_fraud_event_for_country_change(self):
+        """API should persist a flagged fraud event for abrupt country switches."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000029",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000030",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+        FraudEvent.objects.create(
+            user=self.user,
+            event_type=FraudEvent.EventType.TRANSACTION_ATTEMPT,
+            outcome=FraudEvent.Outcome.ALLOWED,
+            country_code="UA",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("transaction-list-create"),
+                {
+                    "from_account_iban": from_account.iban,
+                    "to_account_iban": to_account.iban,
+                    "amount": "25.00",
+                },
+                HTTP_IDEMPOTENCY_KEY="txn-fraud-geo-1",
+                HTTP_X_COUNTRY_CODE="PL",
+                HTTP_X_REGION="Mazowieckie",
+                HTTP_X_CITY="Warsaw",
+                format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        fraud_event = FraudEvent.objects.filter(
+            event_type=FraudEvent.EventType.TRANSACTION_ATTEMPT,
+        ).latest("id")
+        self.assertEqual(fraud_event.outcome, FraudEvent.Outcome.FLAGGED)
+        self.assertEqual(fraud_event.country_code, "PL")
+        self.assertEqual(fraud_event.city, "Warsaw")
 
     def test_cross_currency_transfer_fails_when_exchange_rate_is_missing(self):
         """Test that cross currency transfer fails when exchange rate is missing."""

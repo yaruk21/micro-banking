@@ -11,8 +11,11 @@ from apps.accounts.models import Account
 from apps.accounts.services import SYSTEM_ACCOUNT_USERNAME
 from apps.exchange.models import ExchangeRate
 from apps.transactions.application import (
+    RequestFraudContext,
     SwiftTransferInput,
     TransferInput,
+    confirm_transaction_challenge,
+    TransactionFraudBlockedError,
     TransactionLimitExceededError,
     TransactionPermissionError,
     TransactionValidationError,
@@ -24,9 +27,12 @@ from apps.transactions.application import (
     process_swift_transfer,
 )
 from apps.transactions.models import (
+    FraudEvent,
     SwiftTransferDetails,
     Transaction,
+    TransactionChallenge,
     TransactionIdempotencyKey,
+    TransactionOutbox,
 )
 from apps.transactions.workers.celery_tasks import recover_stuck_transfers_task
 
@@ -326,6 +332,408 @@ class TransferServiceTests(TestCase):
         self.assertEqual(first_transfer.id, second_transfer.id)
         self.assertEqual(Transaction.objects.count(), 1)
         self.assertEqual(TransactionIdempotencyKey.objects.count(), 1)
+        self.assertEqual(FraudEvent.objects.count(), 1)
+
+    def test_create_transfer_stores_allowed_fraud_event(self):
+        """A new transfer attempt should persist an allowed fraud event."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000069",
+            currency=Account.Currency.USD,
+            balance=Decimal("80.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000070",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+
+        transfer, created = create_transfer(
+            transfer_input=TransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                to_account_iban=to_account.iban,
+                amount=Decimal("10.00"),
+                idempotency_key="service-fraud-allowed-1",
+                fraud_context=RequestFraudContext(
+                    request_id="req-fraud-1",
+                    ip_address="203.0.113.10",
+                    user_agent="test-agent/1.0",
+                    country_code="ua",
+                    region="Kyiv",
+                    city="Kyiv",
+                    latitude=Decimal("50.450100"),
+                    longitude=Decimal("30.523400"),
+                ),
+            )
+        )
+
+        self.assertTrue(created)
+        fraud_event = FraudEvent.objects.get()
+        self.assertEqual(fraud_event.user_id, self.user.id)
+        self.assertEqual(fraud_event.transaction_id, transfer.id)
+        self.assertEqual(
+            fraud_event.event_type,
+            FraudEvent.EventType.TRANSACTION_ATTEMPT,
+        )
+        self.assertEqual(fraud_event.outcome, FraudEvent.Outcome.ALLOWED)
+        self.assertEqual(fraud_event.request_id, "req-fraud-1")
+        self.assertEqual(fraud_event.ip_address, "203.0.113.10")
+        self.assertEqual(fraud_event.country_code, "UA")
+
+    @override_settings(
+        TRANSACTION_2FA_CHALLENGE_AMOUNT=Decimal("30.00"),
+        TRANSACTION_2FA_EXPOSE_CHALLENGE_CODE=True,
+    )
+    def test_create_transfer_requires_2fa_for_large_amount_and_resumes_after_confirm(self):
+        """Large transfers should wait for 2FA and resume processing after confirmation."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000087",
+            currency=Account.Currency.USD,
+            balance=Decimal("120.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000088",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+
+        transfer, created = create_transfer(
+            transfer_input=TransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                to_account_iban=to_account.iban,
+                amount=Decimal("40.00"),
+                idempotency_key="service-2fa-large-1",
+            )
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(transfer.status, Transaction.Status.PENDING)
+        self.assertEqual(TransactionOutbox.objects.count(), 0)
+        challenge = TransactionChallenge.objects.get(transaction=transfer)
+        self.assertEqual(challenge.status, TransactionChallenge.Status.PENDING)
+        self.assertTrue(getattr(transfer, "_challenge_code", ""))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            confirmed_transfer = confirm_transaction_challenge(
+                user=self.user,
+                transaction_id=transfer.id,
+                code=transfer._challenge_code,
+            )
+
+        from_account.refresh_from_db()
+        to_account.refresh_from_db()
+        confirmed_transfer.refresh_from_db()
+        challenge.refresh_from_db()
+
+        self.assertEqual(challenge.status, TransactionChallenge.Status.VERIFIED)
+        self.assertEqual(TransactionOutbox.objects.count(), 1)
+        self.assertEqual(confirmed_transfer.status, Transaction.Status.COMPLETED)
+        self.assertEqual(from_account.balance, Decimal("80.00"))
+        self.assertEqual(to_account.balance, Decimal("60.00"))
+
+    @override_settings(
+        TRANSACTION_2FA_CHALLENGE_AMOUNT=Decimal("30.00"),
+        TRANSACTION_2FA_CHALLENGE_MAX_ATTEMPTS=2,
+    )
+    def test_confirm_transaction_challenge_fails_after_too_many_invalid_codes(self):
+        """Too many invalid 2FA codes should fail the challenge and transaction."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000089",
+            currency=Account.Currency.USD,
+            balance=Decimal("120.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000090",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+
+        transfer, created = create_transfer(
+            transfer_input=TransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                to_account_iban=to_account.iban,
+                amount=Decimal("40.00"),
+                idempotency_key="service-2fa-large-2",
+            )
+        )
+
+        self.assertTrue(created)
+        with self.assertRaisesMessage(TransactionValidationError, "Invalid 2FA code."):
+            confirm_transaction_challenge(
+                user=self.user,
+                transaction_id=transfer.id,
+                code="000000",
+            )
+
+        with self.assertRaisesMessage(
+            TransactionValidationError,
+            "2FA challenge failed after too many invalid attempts.",
+        ):
+            confirm_transaction_challenge(
+                user=self.user,
+                transaction_id=transfer.id,
+                code="000000",
+            )
+
+        transfer.refresh_from_db()
+        challenge = TransactionChallenge.objects.get(transaction=transfer)
+        self.assertEqual(challenge.status, TransactionChallenge.Status.FAILED)
+        self.assertEqual(transfer.status, Transaction.Status.FAILED)
+        self.assertEqual(TransactionOutbox.objects.count(), 0)
+
+    @override_settings(
+        FRAUD_AMOUNT_BASELINE_MIN_TRANSACTIONS=3,
+        FRAUD_AMOUNT_ANOMALY_MULTIPLIER=Decimal("2.50"),
+        FRAUD_AMOUNT_ACTION="flag",
+    )
+    def test_create_transfer_flags_amount_anomaly_above_user_baseline(self):
+        """Behavioral fraud should flag unusually large amounts above user history."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000071",
+            currency=Account.Currency.USD,
+            balance=Decimal("500.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000072",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+        for index, historical_amount in enumerate(("10.00", "12.00", "14.00"), start=1):
+            Transaction.objects.create(
+                initiated_by=self.user,
+                from_account=from_account,
+                to_account=to_account,
+                idempotency_key=f"amount-baseline-existing-{index}",
+                request_fingerprint=f"amount-baseline-existing-{index}",
+                amount=Decimal(historical_amount),
+                status=Transaction.Status.COMPLETED,
+                transfer_type=Transaction.TransferType.INTERNAL,
+            )
+
+        transfer, created = create_transfer(
+            transfer_input=TransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                to_account_iban=to_account.iban,
+                amount=Decimal("40.00"),
+                idempotency_key="service-fraud-amount-1",
+            )
+        )
+
+        self.assertTrue(created)
+        fraud_event = FraudEvent.objects.latest("id")
+        self.assertEqual(fraud_event.transaction_id, transfer.id)
+        self.assertEqual(fraud_event.outcome, FraudEvent.Outcome.FLAGGED)
+
+    @override_settings(
+        FRAUD_AMOUNT_BASELINE_MIN_TRANSACTIONS=3,
+        FRAUD_AMOUNT_ANOMALY_MULTIPLIER=Decimal("2.00"),
+        FRAUD_AMOUNT_ACTION="flag",
+    )
+    def test_create_transfer_does_not_flag_amount_within_historical_maximum(self):
+        """Behavioral fraud should not flag an amount that is already within prior maxima."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000083",
+            currency=Account.Currency.USD,
+            balance=Decimal("500.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000084",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+        for index, historical_amount in enumerate(("10.00", "10.00", "35.00"), start=1):
+            Transaction.objects.create(
+                initiated_by=self.user,
+                from_account=from_account,
+                to_account=to_account,
+                idempotency_key=f"amount-max-existing-{index}",
+                request_fingerprint=f"amount-max-existing-{index}",
+                amount=Decimal(historical_amount),
+                status=Transaction.Status.COMPLETED,
+                transfer_type=Transaction.TransferType.INTERNAL,
+            )
+
+        transfer, created = create_transfer(
+            transfer_input=TransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                to_account_iban=to_account.iban,
+                amount=Decimal("30.00"),
+                idempotency_key="service-fraud-amount-2",
+            )
+        )
+
+        self.assertTrue(created)
+        fraud_event = FraudEvent.objects.latest("id")
+        self.assertEqual(fraud_event.transaction_id, transfer.id)
+        self.assertEqual(fraud_event.outcome, FraudEvent.Outcome.ALLOWED)
+
+    @override_settings(
+        FRAUD_FREQUENCY_WINDOW_SECONDS=60,
+        FRAUD_FREQUENCY_MAX_ATTEMPTS=2,
+        FRAUD_FREQUENCY_ACTION="block",
+    )
+    def test_create_transfer_blocks_when_frequency_threshold_is_exceeded(self):
+        """Behavioral fraud should block bursts of transaction attempts when configured."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000073",
+            currency=Account.Currency.USD,
+            balance=Decimal("80.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000074",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+        FraudEvent.objects.create(
+            user=self.user,
+            event_type=FraudEvent.EventType.TRANSACTION_ATTEMPT,
+            outcome=FraudEvent.Outcome.ALLOWED,
+            request_id="prior-fraud-1",
+        )
+        FraudEvent.objects.create(
+            user=self.user,
+            event_type=FraudEvent.EventType.TRANSACTION_ATTEMPT,
+            outcome=FraudEvent.Outcome.ALLOWED,
+            request_id="prior-fraud-2",
+        )
+
+        with self.assertRaisesMessage(
+            TransactionFraudBlockedError,
+            "Transaction was blocked by behavioral fraud checks.",
+        ):
+            create_transfer(
+                transfer_input=TransferInput(
+                    user=self.user,
+                    from_account_iban=from_account.iban,
+                    to_account_iban=to_account.iban,
+                    amount=Decimal("10.00"),
+                    idempotency_key="service-fraud-block-1",
+                    fraud_context=RequestFraudContext(request_id="req-fraud-block-1"),
+                )
+            )
+
+        self.assertEqual(Transaction.objects.count(), 0)
+        self.assertEqual(FraudEvent.objects.count(), 3)
+        self.assertEqual(
+            FraudEvent.objects.latest("id").outcome,
+            FraudEvent.Outcome.BLOCKED,
+        )
+
+    @override_settings(
+        FRAUD_AMOUNT_BASELINE_MIN_TRANSACTIONS=3,
+        FRAUD_AMOUNT_ANOMALY_MULTIPLIER=Decimal("2.50"),
+        FRAUD_AMOUNT_ACTION="block",
+    )
+    def test_create_transfer_blocks_amount_anomaly_when_configured(self):
+        """Behavioral fraud should block anomalously large amounts when configured."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000085",
+            currency=Account.Currency.USD,
+            balance=Decimal("500.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000086",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+        for index, historical_amount in enumerate(("10.00", "12.00", "14.00"), start=1):
+            Transaction.objects.create(
+                initiated_by=self.user,
+                from_account=from_account,
+                to_account=to_account,
+                idempotency_key=f"amount-block-existing-{index}",
+                request_fingerprint=f"amount-block-existing-{index}",
+                amount=Decimal(historical_amount),
+                status=Transaction.Status.COMPLETED,
+                transfer_type=Transaction.TransferType.INTERNAL,
+            )
+
+        with self.assertRaisesMessage(
+            TransactionFraudBlockedError,
+            "Transaction was blocked by behavioral fraud checks.",
+        ):
+            create_transfer(
+                transfer_input=TransferInput(
+                    user=self.user,
+                    from_account_iban=from_account.iban,
+                    to_account_iban=to_account.iban,
+                    amount=Decimal("40.00"),
+                    idempotency_key="service-fraud-amount-block-1",
+                )
+            )
+
+        self.assertEqual(Transaction.objects.count(), 3)
+        self.assertEqual(
+            FraudEvent.objects.latest("id").outcome,
+            FraudEvent.Outcome.BLOCKED,
+        )
+
+    @override_settings(
+        FRAUD_GEO_COUNTRY_CHANGE_WINDOW_SECONDS=7200,
+        FRAUD_GEO_ACTION="flag",
+    )
+    def test_create_transfer_flags_sharp_country_change(self):
+        """Behavioral fraud should flag abrupt country changes across attempts."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000075",
+            currency=Account.Currency.USD,
+            balance=Decimal("80.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000076",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+        FraudEvent.objects.create(
+            user=self.user,
+            event_type=FraudEvent.EventType.TRANSACTION_ATTEMPT,
+            outcome=FraudEvent.Outcome.ALLOWED,
+            country_code="UA",
+        )
+
+        transfer, created = create_transfer(
+            transfer_input=TransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                to_account_iban=to_account.iban,
+                amount=Decimal("10.00"),
+                idempotency_key="service-fraud-geo-1",
+                fraud_context=RequestFraudContext(country_code="PL"),
+            )
+        )
+
+        self.assertTrue(created)
+        fraud_event = FraudEvent.objects.latest("id")
+        self.assertEqual(fraud_event.transaction_id, transfer.id)
+        self.assertEqual(fraud_event.outcome, FraudEvent.Outcome.FLAGGED)
 
     @override_settings(TRANSACTION_SINGLE_LIMIT_AMOUNT=Decimal("9.99"))
     def test_create_transfer_rejects_single_transaction_limit_exceed(self):
@@ -827,3 +1235,76 @@ class SwiftTransferServiceTests(TestCase):
             )
 
         self.assertEqual(Transaction.objects.count(), 1)
+
+    @override_settings(
+        FRAUD_GEO_IMPOSSIBLE_TRAVEL_SPEED_KMH=600,
+        FRAUD_GEO_ACTION="flag",
+    )
+    def test_create_swift_transfer_flags_impossible_travel(self):
+        """SWIFT create should reuse the same behavioral fraud evaluation path."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000001000",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        prior_event = FraudEvent.objects.create(
+            user=self.user,
+            event_type=FraudEvent.EventType.TRANSACTION_ATTEMPT,
+            outcome=FraudEvent.Outcome.ALLOWED,
+            country_code="UA",
+            latitude=Decimal("50.450100"),
+            longitude=Decimal("30.523400"),
+        )
+        FraudEvent.objects.filter(id=prior_event.id).update(
+            created_at=timezone.now() - timedelta(minutes=30)
+        )
+
+        transfer, created = create_swift_transfer(
+            transfer_input=SwiftTransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                amount=Decimal("10.00"),
+                idempotency_key="swift-fraud-geo-1",
+                swift_code="DEUTDEFF500",
+                beneficiary_name="Alice Example",
+                beneficiary_account_number="123456789",
+                beneficiary_iban="DE89370400440532013000",
+                beneficiary_bank_name="Deutsche Bank",
+                beneficiary_bank_country="DE",
+                beneficiary_address="Berlin, Germany",
+                swift_reference="invoice-fraud-1",
+                fraud_context=RequestFraudContext(
+                    country_code="DE",
+                    latitude=Decimal("52.520000"),
+                    longitude=Decimal("13.405000"),
+                ),
+            )
+        )
+
+        self.assertTrue(created)
+        fraud_event = FraudEvent.objects.latest("id")
+        self.assertEqual(fraud_event.transaction_id, transfer.id)
+        self.assertEqual(fraud_event.outcome, FraudEvent.Outcome.FLAGGED)
+
+    @override_settings(
+        TRANSACTION_2FA_CHALLENGE_AMOUNT=Decimal("20.00"),
+    )
+    def test_swift_due_lookup_excludes_pending_2fa_challenges_until_verified(self):
+        """SWIFT due pickup should ignore transactions that still await 2FA verification."""
+
+        transfer = self._create_swift_transfer(amount="25.00")
+        challenge = TransactionChallenge.objects.get(transaction=transfer)
+        SwiftTransferDetails.objects.filter(transaction_id=transfer.id).update(
+            scheduled_processing_at=timezone.now() - timedelta(minutes=5),
+            expected_completion_at=timezone.now() + timedelta(days=1),
+        )
+
+        self.assertEqual(get_due_swift_transaction_ids(limit=10), [])
+
+        challenge.status = TransactionChallenge.Status.VERIFIED
+        challenge.verified_at = timezone.now()
+        challenge.save(update_fields=["status", "verified_at", "updated_at"])
+
+        self.assertEqual(get_due_swift_transaction_ids(limit=10), [transfer.id])

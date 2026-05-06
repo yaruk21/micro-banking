@@ -3,9 +3,11 @@ from .batch import (
     mark_transaction_batch_failed,
     process_transaction_batch,
 )
+from .challenge import confirm_transaction_challenge
 from .create import create_swift_transfer, create_transfer
 from .exceptions import (
     IdempotencyConflictError,
+    TransactionFraudBlockedError,
     TransactionLimitExceededError,
     TransactionError,
     TransactionPermissionError,
@@ -19,17 +21,25 @@ from .outbox import (
 from .process import process_transfer
 from .recovery import get_stuck_transaction_ids
 from .swift import get_due_swift_transaction_ids, process_swift_transfer
-from .types import BatchTransferItemInput, SwiftTransferInput, TransferInput
+from .types import (
+    BatchTransferItemInput,
+    RequestFraudContext,
+    SwiftTransferInput,
+    TransferInput,
+)
 
 __all__ = [
     "BatchTransferItemInput",
     "IdempotencyConflictError",
+    "RequestFraudContext",
+    "TransactionFraudBlockedError",
     "TransactionLimitExceededError",
     "TransactionError",
     "TransactionPermissionError",
     "TransactionValidationError",
     "TransferInput",
     "SwiftTransferInput",
+    "confirm_transaction_challenge",
     "create_transaction_batch",
     "create_swift_transfer",
     "create_transfer",

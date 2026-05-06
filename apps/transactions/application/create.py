@@ -16,12 +16,21 @@ from core.cache_utils import bump_user_cache_version
 from core.structured_logging import log_event
 
 from .cache_versions import bump_pending_transaction_caches
+from .challenge import (
+    create_transaction_challenge,
+    should_create_transaction_challenge,
+)
 from .exceptions import (
     IdempotencyConflictError,
     TransactionPermissionError,
     TransactionValidationError,
 )
 from .exchange import resolve_transfer_conversion
+from .fraud import (
+    attach_fraud_event_transaction,
+    create_transaction_attempt_event,
+    raise_for_fraud_decision,
+)
 from .idempotency import (
     build_swift_transfer_fingerprint,
     build_transfer_fingerprint,
@@ -98,6 +107,13 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
         _log_replayed_transaction(existing_transfer)
         return existing_transfer, False
 
+    fraud_event, fraud_decision = create_transaction_attempt_event(
+        user=transfer_input.user,
+        amount=transfer_input.amount,
+        fraud_context=transfer_input.fraud_context,
+    )
+    raise_for_fraud_decision(decision=fraud_decision)
+
     enforce_transaction_limits(
         user=transfer_input.user,
         amount=transfer_input.amount,
@@ -140,8 +156,23 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
                 request_fingerprint=request_fingerprint,
                 transaction_id=transfer.id,
             )
-            outbox = create_transaction_outbox(transaction=transfer)
-            register_transaction_outbox_publish(outbox_id=outbox.id)
+            challenge_reason_codes = should_create_transaction_challenge(
+                amount=transfer_input.amount,
+                fraud_decision=fraud_decision,
+            )
+            if challenge_reason_codes:
+                create_transaction_challenge(
+                    transaction=transfer,
+                    user=transfer_input.user,
+                    reason_codes=challenge_reason_codes,
+                )
+            else:
+                outbox = create_transaction_outbox(transaction=transfer)
+                register_transaction_outbox_publish(outbox_id=outbox.id)
+            attach_fraud_event_transaction(
+                fraud_event=fraud_event,
+                transaction=transfer,
+            )
     except IntegrityError:
         existing_registry = TransactionIdempotencyKey.objects.filter(
             initiated_by=transfer_input.user,
@@ -169,6 +200,10 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
                 request_fingerprint=request_fingerprint,
             )
             raise
+        attach_fraud_event_transaction(
+            fraud_event=fraud_event,
+            transaction=existing_transfer,
+        )
         _log_replayed_transaction(existing_transfer)
         return existing_transfer, False
 
@@ -260,6 +295,13 @@ def create_swift_transfer(
         _log_replayed_transaction(existing_transfer)
         return existing_transfer, False
 
+    fraud_event, fraud_decision = create_transaction_attempt_event(
+        user=transfer_input.user,
+        amount=transfer_input.amount,
+        fraud_context=transfer_input.fraud_context,
+    )
+    raise_for_fraud_decision(decision=fraud_decision)
+
     enforce_transaction_limits(
         user=transfer_input.user,
         amount=transfer_input.amount,
@@ -317,6 +359,20 @@ def create_swift_transfer(
                 request_fingerprint=request_fingerprint,
                 transaction_id=transfer.id,
             )
+            challenge_reason_codes = should_create_transaction_challenge(
+                amount=transfer_input.amount,
+                fraud_decision=fraud_decision,
+            )
+            if challenge_reason_codes:
+                create_transaction_challenge(
+                    transaction=transfer,
+                    user=transfer_input.user,
+                    reason_codes=challenge_reason_codes,
+                )
+            attach_fraud_event_transaction(
+                fraud_event=fraud_event,
+                transaction=transfer,
+            )
     except IntegrityError:
         existing_registry = TransactionIdempotencyKey.objects.filter(
             initiated_by=transfer_input.user,
@@ -344,6 +400,10 @@ def create_swift_transfer(
                 request_fingerprint=request_fingerprint,
             )
             raise
+        attach_fraud_event_transaction(
+            fraud_event=fraud_event,
+            transaction=existing_transfer,
+        )
         _log_replayed_transaction(existing_transfer)
         return existing_transfer, False
 

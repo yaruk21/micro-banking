@@ -18,6 +18,11 @@ class TransactionLimitExceededError(TransactionValidationError):
     pass
 
 
+class TransactionFraudBlockedError(TransactionValidationError):
+    """Represent a blocked transaction attempt based on fraud checks."""
+    pass
+
+
 class IdempotencyConflictError(TransactionError):
     """Represent idempotency conflict error."""
     pass

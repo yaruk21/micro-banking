@@ -1,9 +1,24 @@
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Optional
 
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
+
+
+@dataclass(frozen=True)
+class RequestFraudContext:
+    """Represent request metadata used for fraud analysis."""
+
+    request_id: str = ""
+    ip_address: str = ""
+    user_agent: str = ""
+    country_code: str = ""
+    region: str = ""
+    city: str = ""
+    latitude: Optional[Decimal] = None
+    longitude: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -14,6 +29,7 @@ class TransferInput:
     to_account_iban: str
     amount: Decimal
     idempotency_key: str
+    fraud_context: Optional[RequestFraudContext] = None
 
 
 @dataclass(frozen=True)
@@ -32,6 +48,7 @@ class SwiftTransferInput:
     beneficiary_bank_country: str
     beneficiary_address: str
     swift_reference: str
+    fraud_context: Optional[RequestFraudContext] = None
 
 
 @dataclass(frozen=True)

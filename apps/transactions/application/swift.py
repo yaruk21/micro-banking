@@ -8,7 +8,7 @@ from django.utils import timezone
 from apps.accounts.cache import refresh_account_balance_cache
 from apps.accounts.models import Account
 from apps.accounts.services import get_or_create_system_account
-from apps.transactions.models import SwiftTransferDetails, Transaction
+from apps.transactions.models import SwiftTransferDetails, Transaction, TransactionChallenge
 from apps.transactions.realtime import publish_transaction_status_update
 from core.cache_utils import bump_user_cache_version
 from core.structured_logging import log_event
@@ -30,6 +30,8 @@ def get_due_swift_transaction_ids(
     return list(
         Transaction.objects.filter(
             transfer_type=Transaction.TransferType.SWIFT,
+        ).exclude(
+            challenge__status=TransactionChallenge.Status.PENDING,
         ).filter(
             Q(
                 status=Transaction.Status.PENDING,

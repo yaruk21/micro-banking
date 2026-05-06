@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.core.cache import cache
@@ -18,13 +19,20 @@ from core.structured_logging import log_event
 from apps.transactions.application import (
     BatchTransferItemInput,
     IdempotencyConflictError,
+    RequestFraudContext,
     SwiftTransferInput,
     TransferInput,
+    confirm_transaction_challenge,
     create_transaction_batch,
     TransactionPermissionError,
     TransactionValidationError,
     create_swift_transfer,
     create_transfer,
+)
+from apps.transactions.application.challenge import (
+    expose_transaction_challenge_code,
+    get_debug_transaction_challenge_code,
+    sync_transaction_challenge_state,
 )
 from apps.transactions.models import Transaction, TransactionBatch
 from apps.transactions.selectors import list_user_transactions
@@ -34,6 +42,7 @@ from .serializers import (
     TransactionBatchCreateSerializer,
     TransactionBatchReadSerializer,
     SwiftTransactionCreateSerializer,
+    TransactionChallengeConfirmSerializer,
     TransactionCreateSerializer,
     TransactionReadSerializer,
     TransactionStatusSerializer,
@@ -147,6 +156,7 @@ class TransactionListCreateView(generics.ListCreateAPIView):
                     to_account_iban=serializer.validated_data["to_account"].iban,
                     amount=serializer.validated_data["amount"],
                     idempotency_key=idempotency_key,
+                    fraud_context=_build_request_fraud_context(request),
                 )
             )
         except TransactionPermissionError as exc:
@@ -166,7 +176,13 @@ class TransactionListCreateView(generics.ListCreateAPIView):
         except TransactionValidationError as exc:
             raise ValidationError({"detail": str(exc)}) from exc
 
-        response_serializer = TransactionReadSerializer(transaction)
+        response_serializer = TransactionReadSerializer(
+            transaction,
+            context=_build_transaction_serializer_context(
+                request,
+                transaction=transaction,
+            ),
+        )
         response_status = (
             status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK
         )
@@ -193,8 +209,12 @@ class TransactionStatusView(generics.GenericAPIView):
         ).first()
         if transaction is None:
             raise NotFound("Transaction not found.")
+        transaction = sync_transaction_challenge_state(transaction=transaction)
 
-        serializer = self.get_serializer(transaction)
+        serializer = self.get_serializer(
+            transaction,
+            context={"request": request},
+        )
         return Response(serializer.data)
 
 
@@ -266,6 +286,7 @@ class TransactionSwiftCreateView(generics.GenericAPIView):
                         "beneficiary_address"
                     ],
                     swift_reference=serializer.validated_data["swift_reference"],
+                    fraud_context=_build_request_fraud_context(request),
                 )
             )
         except TransactionPermissionError as exc:
@@ -275,9 +296,46 @@ class TransactionSwiftCreateView(generics.GenericAPIView):
         except TransactionValidationError as exc:
             raise ValidationError({"detail": str(exc)}) from exc
 
-        response_serializer = TransactionReadSerializer(transaction)
+        response_serializer = TransactionReadSerializer(
+            transaction,
+            context=_build_transaction_serializer_context(
+                request,
+                transaction=transaction,
+            ),
+        )
         response_status = status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK
         return Response(response_serializer.data, status=response_status)
+
+
+class TransactionChallengeConfirmView(generics.GenericAPIView):
+    """Handle transaction 2FA confirmation API requests."""
+
+    serializer_class = TransactionChallengeConfirmSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "transactions_write"
+
+    def post(self, request, *args, **kwargs):
+        """Confirm one pending transaction 2FA challenge."""
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            transaction = confirm_transaction_challenge(
+                user=request.user,
+                transaction_id=kwargs["pk"],
+                code=serializer.validated_data["code"],
+            )
+        except TransactionPermissionError as exc:
+            raise PermissionDenied(str(exc)) from exc
+        except TransactionValidationError as exc:
+            raise ValidationError({"detail": str(exc)}) from exc
+
+        response_serializer = TransactionReadSerializer(
+            transaction,
+            context={"request": request},
+        )
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
 
 
 class TransactionBatchCreateView(generics.GenericAPIView):
@@ -370,3 +428,65 @@ class TransactionBatchStatusView(generics.GenericAPIView):
 
         serializer = self.get_serializer(batch)
         return Response(serializer.data)
+
+
+def _build_request_fraud_context(request) -> RequestFraudContext:
+    """Extract request metadata used by behavioral fraud checks."""
+
+    return RequestFraudContext(
+        request_id=str(getattr(request, "request_id", "") or "").strip(),
+        ip_address=_extract_client_ip(request),
+        user_agent=request.headers.get("User-Agent", ""),
+        country_code=_first_header_value(request, "X-Country-Code", "CF-IPCountry"),
+        region=_first_header_value(request, "X-Region"),
+        city=_first_header_value(request, "X-City"),
+        latitude=_parse_decimal_header(_first_header_value(request, "X-Latitude")),
+        longitude=_parse_decimal_header(_first_header_value(request, "X-Longitude")),
+    )
+
+
+def _extract_client_ip(request) -> str:
+    """Return the best-effort client IP address for the current request."""
+
+    forwarded_for = request.headers.get("X-Forwarded-For", "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.headers.get("X-Real-IP", "").strip() or str(
+        request.META.get("REMOTE_ADDR", "")
+    ).strip()
+
+
+def _first_header_value(request, *header_names: str) -> str:
+    """Return the first non-empty request header value."""
+
+    for header_name in header_names:
+        value = request.headers.get(header_name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _parse_decimal_header(raw_value: str):
+    """Parse an optional decimal header without failing the request."""
+
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+
+    try:
+        return Decimal(value)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _build_transaction_serializer_context(request, *, transaction=None) -> dict:
+    """Build serializer context for transaction responses."""
+
+    challenge_code = None
+    if transaction is not None and expose_transaction_challenge_code():
+        challenge_code = get_debug_transaction_challenge_code(transaction=transaction)
+    return {
+        "request": request,
+        "include_challenge_code": bool(challenge_code),
+        "challenge_code": challenge_code,
+    }

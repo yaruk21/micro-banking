@@ -3,11 +3,17 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from apps.accounts.models import Account
+from apps.transactions.application.challenge import (
+    get_transaction_challenge,
+    get_transaction_challenge_reason_codes,
+    transaction_requires_2fa,
+)
 from apps.transactions.models import (
     COUNTRY_CODE_VALIDATOR,
     IBAN_VALIDATOR,
     SWIFT_CODE_VALIDATOR,
     Transaction,
+    TransactionChallenge,
     TransactionBatch,
     TransactionBatchItem,
     SwiftTransferDetails,
@@ -85,6 +91,45 @@ class SwiftTransferDetailsReadSerializer(serializers.Serializer):
     swift_fee_rate = serializers.DecimalField(max_digits=6, decimal_places=4)
 
 
+class TransactionChallengeReadSerializer(serializers.ModelSerializer):
+    """Serialize persisted 2FA challenge state for one transaction."""
+
+    attempts_remaining = serializers.SerializerMethodField()
+    reason_codes = serializers.SerializerMethodField()
+    debug_code = serializers.SerializerMethodField()
+
+    class Meta:
+        """Represent meta."""
+
+        model = TransactionChallenge
+        fields = (
+            "id",
+            "status",
+            "expires_at",
+            "verified_at",
+            "attempts_remaining",
+            "reason_codes",
+            "debug_code",
+        )
+
+    def get_attempts_remaining(self, obj: TransactionChallenge):
+        """Return how many invalid attempts remain before challenge failure."""
+
+        return max(obj.max_attempts - obj.attempts_count, 0)
+
+    def get_reason_codes(self, obj: TransactionChallenge):
+        """Return normalized challenge reason codes."""
+
+        return get_transaction_challenge_reason_codes(challenge=obj)
+
+    def get_debug_code(self, obj: TransactionChallenge):
+        """Return the transient challenge code only when explicitly allowed."""
+
+        if not self.context.get("include_challenge_code", False):
+            return None
+        return self.context.get("challenge_code")
+
+
 class TransactionReadSerializer(serializers.ModelSerializer):
     """Serialize and validate transaction read data."""
     from_account_iban = serializers.CharField(source="from_account.iban", read_only=True)
@@ -95,6 +140,8 @@ class TransactionReadSerializer(serializers.ModelSerializer):
     to_account_iban = serializers.SerializerMethodField()
     to_account_currency = serializers.SerializerMethodField()
     swift_details = serializers.SerializerMethodField()
+    requires_2fa = serializers.SerializerMethodField()
+    challenge = serializers.SerializerMethodField()
 
     class Meta:
         """Represent meta."""
@@ -120,6 +167,8 @@ class TransactionReadSerializer(serializers.ModelSerializer):
             "completed_at",
             "failure_reason",
             "swift_details",
+            "requires_2fa",
+            "challenge",
         )
 
     def get_to_account_iban(self, obj: Transaction):
@@ -140,11 +189,29 @@ class TransactionReadSerializer(serializers.ModelSerializer):
             return None
         return SwiftTransferDetailsReadSerializer(details).data
 
+    def get_requires_2fa(self, obj: Transaction):
+        """Return whether the transaction currently waits for 2FA verification."""
+
+        return transaction_requires_2fa(transaction=obj)
+
+    def get_challenge(self, obj: Transaction):
+        """Return serialized challenge state when the transaction has one."""
+
+        challenge = get_transaction_challenge(transaction=obj)
+        if challenge is None:
+            return None
+        return TransactionChallengeReadSerializer(
+            challenge,
+            context=self.context,
+        ).data
+
 
 class TransactionStatusSerializer(serializers.ModelSerializer):
     """Serialize and validate transaction status data."""
     scheduled_processing_at = serializers.SerializerMethodField()
     expected_completion_at = serializers.SerializerMethodField()
+    requires_2fa = serializers.SerializerMethodField()
+    challenge = serializers.SerializerMethodField()
 
     class Meta:
         """Represent meta."""
@@ -159,6 +226,8 @@ class TransactionStatusSerializer(serializers.ModelSerializer):
             "failure_reason",
             "scheduled_processing_at",
             "expected_completion_at",
+            "requires_2fa",
+            "challenge",
         )
 
     def get_scheduled_processing_at(self, obj: Transaction):
@@ -181,6 +250,22 @@ class TransactionStatusSerializer(serializers.ModelSerializer):
             details.expected_completion_at
         )
 
+    def get_requires_2fa(self, obj: Transaction):
+        """Return whether the transaction currently waits for 2FA verification."""
+
+        return transaction_requires_2fa(transaction=obj)
+
+    def get_challenge(self, obj: Transaction):
+        """Return serialized challenge state when the transaction has one."""
+
+        challenge = get_transaction_challenge(transaction=obj)
+        if challenge is None:
+            return None
+        return TransactionChallengeReadSerializer(
+            challenge,
+            context=self.context,
+        ).data
+
 
 def _get_swift_details(transaction: Transaction):
     """Return reverse one-to-one SWIFT details when present."""
@@ -189,6 +274,12 @@ def _get_swift_details(transaction: Transaction):
         return transaction.swift_details
     except SwiftTransferDetails.DoesNotExist:
         return None
+
+
+class TransactionChallengeConfirmSerializer(serializers.Serializer):
+    """Serialize and validate one 2FA challenge confirmation payload."""
+
+    code = serializers.CharField(max_length=32)
 
 
 class TransactionBatchItemCreateSerializer(serializers.Serializer):

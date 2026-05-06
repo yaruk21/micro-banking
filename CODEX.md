@@ -12,6 +12,7 @@
 - `core/`: global settings, URL wiring, ASGI/WSGI, Celery bootstrap, DB runtime tuning, read-replica helper, cache helpers, structured logging, health check.
 - `apps/accounts/`: account model, registration serializer/view, account list/create API, account caching, small account services/selectors.
 - `apps/transactions/`: main transaction domain.
+- `apps/transactions/models/`: split transaction domain models package. Models are grouped by concern (`transaction`, `batch`, `async_support`, `swift`, `fraud`) and re-exported through `apps.transactions.models`.
 - `apps/transactions/api/`: REST serializers, views, filters, URL routes.
 - `apps/transactions/application/`: transaction creation, processing, idempotency, batch orchestration, FX resolution, outbox, recovery helpers, input dataclasses.
 - `apps/transactions/workers/`: Celery tasks for processing, recovery, outbox publishing, partition maintenance.
@@ -63,6 +64,7 @@
   - `TransactionOutbox`: async dispatch state for accepted transfers
   - `TransactionIdempotencyKey`: separate registry for global idempotency outside the partitioned transaction table
   - `SwiftTransferDetails`: SWIFT recipient/fee/scheduling metadata for one transaction
+  - `FraudEvent`: user activity/risk signal storage for fraud frequency and geolocation analysis
 - **FX:**
   - `ExchangeRate`: `base_currency`, `quote_currency`, `rate`, `provider`, `fetched_at`
 - **Relationships:**
@@ -115,12 +117,14 @@
   - read-replica-aware selectors
   - structured JSON logging with propagated request/task correlation ids
   - DRF throttling scopes for register/accounts/transactions
+  - configurable single/day/month transaction amount limits for internal and SWIFT create flows
 - **Partially implemented / active area:**
   - SWIFT transfer creation endpoint exists and stores beneficiary metadata plus planned timestamps
   - SWIFT status is exposed in serializers/status payloads
-  - SWIFT processing/settlement workflow itself looks unfinished: accepted SWIFT transfers are not sent through the internal outbox/worker path, and there is no separate background settlement pipeline yet
+  - fraud detection is started: transaction amount limits are implemented, and `FraudEvent` schema now exists for behavior analysis
 - **Clearly not implemented yet (based on current repo):**
-  - fraud detection / 2FA flows
+  - anomaly-frequency and geolocation fraud rules are not implemented yet
+  - 2FA challenge flow is not implemented yet
   - analytics/reporting endpoints
   - PDF report generation
   - cloud storage + temporary file links
@@ -156,7 +160,7 @@
   - DB: `USE_SQLITE`, `USE_POSTGRES_FOR_TESTS`, `POSTGRES_*`, `POSTGRES_REPLICA_*`, `READ_REPLICA_ENABLED`
   - Redis/Celery: `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `REDIS_CACHE_URL`, `REALTIME_REDIS_URL`
   - pooling/tuning: `DB_USE_PGBOUNCER`, `CONN_MAX_AGE`, `DB_CONN_HEALTH_CHECKS`, `DB_DISABLE_SERVER_SIDE_CURSORS`
-  - app tuning: `LIST_CACHE_TIMEOUT_SECONDS`, `ACCOUNT_BALANCE_CACHE_TIMEOUT_SECONDS`, `EXCHANGE_RATE_CACHE_TIMEOUT_SECONDS`, `TRANSACTION_STUCK_THRESHOLD_SECONDS`, `TRANSACTION_OUTBOX_PUBLISH_*`, `TRANSACTION_PARTITION_*`, `EXCHANGE_RATE_SYNC_INTERVAL_SECONDS`, `FX_EXCHANGE_FEE_RATE`
+  - app tuning: `LIST_CACHE_TIMEOUT_SECONDS`, `ACCOUNT_BALANCE_CACHE_TIMEOUT_SECONDS`, `EXCHANGE_RATE_CACHE_TIMEOUT_SECONDS`, `TRANSACTION_STUCK_THRESHOLD_SECONDS`, `TRANSACTION_OUTBOX_PUBLISH_*`, `TRANSACTION_PARTITION_*`, `EXCHANGE_RATE_SYNC_INTERVAL_SECONDS`, `FX_EXCHANGE_FEE_RATE`, `TRANSACTION_SINGLE_LIMIT_AMOUNT`, `TRANSACTION_DAILY_LIMIT_AMOUNT`, `TRANSACTION_MONTHLY_LIMIT_AMOUNT`
 - **Migrations:** use Django migrations via `python manage.py migrate`.
 - **Operational commands:**
   ```bash

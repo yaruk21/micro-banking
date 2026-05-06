@@ -12,7 +12,7 @@ def list_user_transactions(*, user: User, force_primary: bool = False):
     """List user transactions."""
     return (
         Transaction.objects.using(get_read_db_alias(force_primary=force_primary))
-        .select_related("from_account", "to_account", "swift_details")
+        .select_related("from_account", "to_account", "swift_details", "challenge")
         .filter(Q(from_account__owner=user) | Q(to_account__owner=user))
         .distinct()
     )
