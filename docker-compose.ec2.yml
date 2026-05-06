@@ -4,14 +4,28 @@ services:
     restart: unless-stopped
     env_file:
       - .env.ec2
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgbouncer:
+    build:
+      context: ./deploy/pgbouncer
+    restart: unless-stopped
+    env_file:
+      - .env.ec2
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -31,6 +45,7 @@ services:
     env_file:
       - .env.ec2
     environment:
+      DB_USE_PGBOUNCER: 0
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -47,14 +62,15 @@ services:
     env_file:
       - .env.ec2
     environment:
-      POSTGRES_HOST: db
-      POSTGRES_PORT: 5432
+      DB_USE_PGBOUNCER: 1
+      POSTGRES_HOST: pgbouncer
+      POSTGRES_PORT: 6432
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       REDIS_CACHE_URL: redis://redis:6379/1
     command: /app/deploy/entrypoint.sh
     depends_on:
-      db:
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -69,14 +85,15 @@ services:
     env_file:
       - .env.ec2
     environment:
-      POSTGRES_HOST: db
-      POSTGRES_PORT: 5432
+      DB_USE_PGBOUNCER: 1
+      POSTGRES_HOST: pgbouncer
+      POSTGRES_PORT: 6432
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       REDIS_CACHE_URL: redis://redis:6379/1
     command: celery -A core worker -l info
     depends_on:
-      db:
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -89,14 +106,15 @@ services:
     env_file:
       - .env.ec2
     environment:
-      POSTGRES_HOST: db
-      POSTGRES_PORT: 5432
+      DB_USE_PGBOUNCER: 1
+      POSTGRES_HOST: pgbouncer
+      POSTGRES_PORT: 6432
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       REDIS_CACHE_URL: redis://redis:6379/1
     command: celery -A core beat -l info --schedule /tmp/celerybeat-schedule
     depends_on:
-      db:
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy

@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+: "${POSTGRES_DB:?POSTGRES_DB is required}"
+: "${POSTGRES_USER:?POSTGRES_USER is required}"
+: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+: "${POSTGRES_HOST:?POSTGRES_HOST is required}"
+: "${POSTGRES_PORT:?POSTGRES_PORT is required}"
+
+PGBOUNCER_PORT="${PGBOUNCER_PORT:-6432}"
+PGBOUNCER_POOL_MODE="${PGBOUNCER_POOL_MODE:-transaction}"
+PGBOUNCER_MAX_CLIENT_CONN="${PGBOUNCER_MAX_CLIENT_CONN:-1000}"
+PGBOUNCER_DEFAULT_POOL_SIZE="${PGBOUNCER_DEFAULT_POOL_SIZE:-100}"
+PGBOUNCER_RESERVE_POOL_SIZE="${PGBOUNCER_RESERVE_POOL_SIZE:-25}"
+PGBOUNCER_SERVER_IDLE_TIMEOUT="${PGBOUNCER_SERVER_IDLE_TIMEOUT:-30}"
+PGBOUNCER_QUERY_WAIT_TIMEOUT="${PGBOUNCER_QUERY_WAIT_TIMEOUT:-120}"
+PGBOUNCER_AUTH_TYPE="${PGBOUNCER_AUTH_TYPE:-plain}"
+PGBOUNCER_ADMIN_USERS="${PGBOUNCER_ADMIN_USERS:-$POSTGRES_USER}"
+PGBOUNCER_STATS_USERS="${PGBOUNCER_STATS_USERS:-$POSTGRES_USER}"
+PGBOUNCER_IGNORE_STARTUP_PARAMETERS="${PGBOUNCER_IGNORE_STARTUP_PARAMETERS:-extra_float_digits}"
+PGBOUNCER_SERVER_TLS_SSLMODE="${PGBOUNCER_SERVER_TLS_SSLMODE:-disable}"
+
+mkdir -p /etc/pgbouncer /var/run/pgbouncer
+
+cat > /etc/pgbouncer/userlist.txt <<EOF
+"$POSTGRES_USER" "$POSTGRES_PASSWORD"
+EOF
+
+cat > /etc/pgbouncer/pgbouncer.ini <<EOF
+[databases]
+$POSTGRES_DB = host=$POSTGRES_HOST port=$POSTGRES_PORT dbname=$POSTGRES_DB user=$POSTGRES_USER password=$POSTGRES_PASSWORD
+
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = $PGBOUNCER_PORT
+auth_type = $PGBOUNCER_AUTH_TYPE
+auth_file = /etc/pgbouncer/userlist.txt
+pool_mode = $PGBOUNCER_POOL_MODE
+max_client_conn = $PGBOUNCER_MAX_CLIENT_CONN
+default_pool_size = $PGBOUNCER_DEFAULT_POOL_SIZE
+reserve_pool_size = $PGBOUNCER_RESERVE_POOL_SIZE
+server_idle_timeout = $PGBOUNCER_SERVER_IDLE_TIMEOUT
+query_wait_timeout = $PGBOUNCER_QUERY_WAIT_TIMEOUT
+ignore_startup_parameters = $PGBOUNCER_IGNORE_STARTUP_PARAMETERS
+server_tls_sslmode = $PGBOUNCER_SERVER_TLS_SSLMODE
+admin_users = $PGBOUNCER_ADMIN_USERS
+stats_users = $PGBOUNCER_STATS_USERS
+pidfile = /var/run/pgbouncer/pgbouncer.pid
+unix_socket_dir = /var/run/pgbouncer
+EOF
+
+exec pgbouncer /etc/pgbouncer/pgbouncer.ini

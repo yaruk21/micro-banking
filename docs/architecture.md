@@ -20,6 +20,8 @@ PostgreSQL-specific storage notes:
 
 - `transactions_transaction` is range-partitioned by `created_at` into monthly partitions plus a `DEFAULT` partition.
 - Celery Beat runs scheduled partition maintenance to pre-create future monthly transaction partitions.
+- Read traffic can be split between `default` (primary) and `replica` through selector-level routing for safe read-only queries.
+- The Django app is PgBouncer-ready through env-driven connection tuning, including per-alias connection lifetime, health checks, and server-side cursor control.
 - Global transaction idempotency is enforced via a separate `TransactionIdempotencyKey` registry table so monthly partitions do not need a cross-partition unique constraint.
 
 ## Transaction Flow
@@ -90,8 +92,12 @@ Flow:
 ### EC2 / Compose
 
 - `migrate` is a one-shot release step
+- `migrate` keeps using the direct primary PostgreSQL endpoint
+- `pgbouncer` is a dedicated connection-management layer in front of PostgreSQL
 - `web`, `celery_worker`, and `celery_beat` depend on successful migration completion
+- `web`, `celery_worker`, and `celery_beat` use the pooled PostgreSQL endpoint exposed by `pgbouncer`
 - `web` only handles collectstatic, optional admin bootstrap, and Gunicorn startup
+- PgBouncer can sit in front of the primary and optional replica for app traffic, while the migrate/release step should keep using the direct primary endpoint
 
 ## Known Architectural Limits
 
@@ -100,7 +106,7 @@ These are the main remaining gaps before the system can be called banking-grade:
 1. `Account.balance` is still mutable state rather than a projection from immutable ledger entries.
 2. PostgreSQL concurrency semantics are relied on in production, but the current default test lane uses SQLite.
 3. Observability is still basic text logging rather than structured transaction event logs and traces.
-4. Read scaling still relies on a single primary database with no replica routing.
+4. Replica routing is intentionally limited to safe selector-driven read paths; critical read-after-write flows still stay on the primary.
 
 ## Next Architecture Steps
 

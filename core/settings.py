@@ -4,6 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
+from core.db_config import apply_database_runtime_settings
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
@@ -16,6 +17,13 @@ def env_to_bool(name: str, default: bool = False) -> bool:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
 
+
+def env_to_int(name: str, default: int) -> int:
+    """Handle env to int."""
+    return int(os.getenv(name, str(default)))
+
+
+# Core Django environment
 SECRET_KEY = os.getenv(
     "SECRET_KEY",
     "unsafe-dev-secret-key-change-me-to-a-long-random-value",
@@ -79,6 +87,7 @@ TEMPLATES = [
 WSGI_APPLICATION = "core.wsgi.application"
 ASGI_APPLICATION = "core.asgi.application"
 
+# Test/runtime database selection
 RUNNING_PYTEST = any("pytest" in arg for arg in sys.argv)
 RUNNING_TESTS = RUNNING_PYTEST or (
     len(sys.argv) > 1 and sys.argv[1] == "test"
@@ -88,6 +97,7 @@ USE_POSTGRES_FOR_TESTS = env_to_bool("USE_POSTGRES_FOR_TESTS", False)
 if env_to_bool("USE_SQLITE", False) or (
     RUNNING_TESTS and not USE_POSTGRES_FOR_TESTS
 ):
+    # SQLite keeps local development and the default test lane lightweight.
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
@@ -95,6 +105,7 @@ if env_to_bool("USE_SQLITE", False) or (
         }
     }
 else:
+    # Primary handles all writes and consistency-sensitive reads.
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
@@ -105,6 +116,20 @@ else:
             "PORT": os.getenv("POSTGRES_PORT", "5432"),
         }
     }
+    replica_host = os.getenv("POSTGRES_REPLICA_HOST", "").strip()
+    if replica_host:
+        # Replica is attached only when explicitly configured in env.
+        DATABASES["replica"] = {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("POSTGRES_REPLICA_DB", os.getenv("POSTGRES_DB", "micro_banking")),
+            "USER": os.getenv("POSTGRES_REPLICA_USER", os.getenv("POSTGRES_USER", "micro_banking")),
+            "PASSWORD": os.getenv(
+                "POSTGRES_REPLICA_PASSWORD",
+                os.getenv("POSTGRES_PASSWORD", "micro_banking"),
+            ),
+            "HOST": replica_host,
+            "PORT": os.getenv("POSTGRES_REPLICA_PORT", os.getenv("POSTGRES_PORT", "5432")),
+        }
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -113,6 +138,7 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
+# Locale/timezone
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = {
     "Europe/Kiev": "Europe/Kyiv",
@@ -120,6 +146,7 @@ TIME_ZONE = {
 USE_I18N = True
 USE_TZ = True
 
+# Static files
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STORAGES = {
@@ -129,12 +156,14 @@ STORAGES = {
 }
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# Trusted origins and cache backend
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
     if origin.strip()
 ]
 if RUNNING_TESTS:
+    # Keep tests deterministic without external Redis dependency.
     CACHES = {
         "default": {
             "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
@@ -142,6 +171,7 @@ if RUNNING_TESTS:
         }
     }
 else:
+    # Production and dev cache share Redis-style configuration.
     redis_cache_url = os.getenv(
         "REDIS_CACHE_URL",
         os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/1"),
@@ -157,6 +187,7 @@ EXCHANGE_RATE_CACHE_TIMEOUT_SECONDS = int(
     os.getenv("EXCHANGE_RATE_CACHE_TIMEOUT_SECONDS", "300")
 )
 
+# Celery and Redis wiring
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
 CELERY_RESULT_BACKEND = os.getenv(
     "CELERY_RESULT_BACKEND",
@@ -183,6 +214,10 @@ REALTIME_REDIS_URL = os.getenv(
         os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/1"),
     ),
 )
+# Read routing stays disabled unless both the flag and replica config are present.
+READ_REPLICA_ENABLED = env_to_bool("READ_REPLICA_ENABLED", False) and "replica" in DATABASES
+
+# Background job cadence and FX settings
 TRANSACTION_OUTBOX_PUBLISH_INTERVAL_SECONDS = int(
     os.getenv("TRANSACTION_OUTBOX_PUBLISH_INTERVAL_SECONDS", "15")
 )
@@ -224,11 +259,23 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
+# Security and connection tuning
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SESSION_COOKIE_SECURE = env_to_bool("SESSION_COOKIE_SECURE", not DEBUG)
 CSRF_COOKIE_SECURE = env_to_bool("CSRF_COOKIE_SECURE", not DEBUG)
 SECURE_SSL_REDIRECT = env_to_bool("SECURE_SSL_REDIRECT", False)
-CONN_MAX_AGE = int(os.getenv("CONN_MAX_AGE", "60"))
+DB_USE_PGBOUNCER = env_to_bool("DB_USE_PGBOUNCER", False)
+CONN_MAX_AGE = env_to_int("CONN_MAX_AGE", 0 if DB_USE_PGBOUNCER else 60)
+DB_CONN_HEALTH_CHECKS = env_to_bool(
+    "DB_CONN_HEALTH_CHECKS",
+    CONN_MAX_AGE > 0,
+)
+DB_DISABLE_SERVER_SIDE_CURSORS = env_to_bool(
+    "DB_DISABLE_SERVER_SIDE_CURSORS",
+    DB_USE_PGBOUNCER,
+)
+POSTGRES_SSL_MODE = os.getenv("POSTGRES_SSL_MODE", "").strip()
+POSTGRES_APPLICATION_NAME = os.getenv("POSTGRES_APPLICATION_NAME", "").strip()
 LIST_CACHE_TIMEOUT_SECONDS = int(os.getenv("LIST_CACHE_TIMEOUT_SECONDS", "60"))
 ACCOUNT_BALANCE_CACHE_TIMEOUT_SECONDS = int(
     os.getenv("ACCOUNT_BALANCE_CACHE_TIMEOUT_SECONDS", "60")
@@ -240,8 +287,41 @@ TRANSACTION_STUCK_THRESHOLD_SECONDS = int(
     os.getenv("TRANSACTION_STUCK_THRESHOLD_SECONDS", "300")
 )
 
+# Apply connection lifetime after database aliases are assembled.
 DATABASES["default"]["CONN_MAX_AGE"] = CONN_MAX_AGE
+if DATABASES["default"]["ENGINE"] == "django.db.backends.postgresql":
+    DATABASES["default"] = apply_database_runtime_settings(
+        DATABASES["default"],
+        conn_max_age=CONN_MAX_AGE,
+        conn_health_checks=DB_CONN_HEALTH_CHECKS,
+        disable_server_side_cursors=DB_DISABLE_SERVER_SIDE_CURSORS,
+        ssl_mode=POSTGRES_SSL_MODE,
+        application_name=POSTGRES_APPLICATION_NAME,
+    )
+if "replica" in DATABASES:
+    replica_conn_max_age = env_to_int(
+        "POSTGRES_REPLICA_CONN_MAX_AGE",
+        CONN_MAX_AGE,
+    )
+    DATABASES["replica"] = apply_database_runtime_settings(
+        DATABASES["replica"],
+        conn_max_age=replica_conn_max_age,
+        conn_health_checks=env_to_bool(
+            "POSTGRES_REPLICA_CONN_HEALTH_CHECKS",
+            DB_CONN_HEALTH_CHECKS,
+        ),
+        disable_server_side_cursors=env_to_bool(
+            "POSTGRES_REPLICA_DISABLE_SERVER_SIDE_CURSORS",
+            DB_DISABLE_SERVER_SIDE_CURSORS,
+        ),
+        ssl_mode=os.getenv("POSTGRES_REPLICA_SSL_MODE", POSTGRES_SSL_MODE).strip(),
+        application_name=os.getenv(
+            "POSTGRES_REPLICA_APPLICATION_NAME",
+            POSTGRES_APPLICATION_NAME,
+        ).strip(),
+    )
 
+# DRF and auth configuration
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
@@ -283,6 +363,7 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
+# Structured JSON logging
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

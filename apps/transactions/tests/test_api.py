@@ -1,7 +1,9 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -10,6 +12,7 @@ from apps.accounts.models import Account
 from apps.accounts.services import SYSTEM_ACCOUNT_USERNAME
 from apps.exchange.models import ExchangeRate
 from apps.transactions.models import Transaction
+from apps.transactions.selectors import list_user_transactions
 
 User = get_user_model()
 
@@ -339,6 +342,48 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(response.data["id"], transaction.id)
         self.assertEqual(response.data["status"], Transaction.Status.PENDING)
 
+    @patch("apps.transactions.api.views.list_user_transactions")
+    def test_transaction_status_endpoint_forces_primary_read(
+        self,
+        mock_list_user_transactions,
+    ):
+        """Test that transaction status endpoint forces primary read routing."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000951",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000952",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+        transaction = Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=from_account,
+            to_account=to_account,
+            idempotency_key="status-view-primary-1",
+            request_fingerprint="fingerprint-status-view-primary-1",
+            amount=Decimal("25.00"),
+            status=Transaction.Status.PENDING,
+        )
+        mock_list_user_transactions.return_value = Transaction.objects.filter(
+            id=transaction.id
+        )
+
+        response = self.client.get(
+            reverse("transaction-status", kwargs={"pk": transaction.id})
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_list_user_transactions.assert_called_once_with(
+            user=self.user,
+            force_primary=True,
+        )
+
     def test_same_idempotency_key_returns_existing_transaction(self):
         """Test that same idempotency key returns existing transaction."""
         from_account = Account.objects.create(
@@ -417,3 +462,29 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(first_response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(second_response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(Transaction.objects.count(), 1)
+
+
+class TransactionSelectorReplicaRoutingTests(SimpleTestCase):
+    """Test transaction selector replica routing behavior."""
+
+    @override_settings(
+        READ_REPLICA_ENABLED=True,
+        DATABASES={
+            "default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"},
+            "replica": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"},
+        },
+    )
+    def test_list_user_transactions_uses_replica_when_enabled(self):
+        """Test that list_user_transactions uses replica when enabled."""
+
+        queryset = list_user_transactions(user=User(id=1))
+
+        self.assertEqual(queryset.db, "replica")
+
+    @override_settings(READ_REPLICA_ENABLED=False)
+    def test_list_user_transactions_uses_primary_when_replica_disabled(self):
+        """Test that list_user_transactions uses primary when replica is disabled."""
+
+        queryset = list_user_transactions(user=User(id=1))
+
+        self.assertEqual(queryset.db, "default")

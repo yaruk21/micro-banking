@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -10,6 +11,7 @@ from apps.transactions.application import process_transfer
 from apps.transactions.models import Transaction
 
 from .models import Account
+from .selectors import list_user_accounts
 from .serializers import AccountReadSerializer
 
 User = get_user_model()
@@ -154,3 +156,29 @@ class AccountApiTests(APITestCase):
             AccountReadSerializer(recipient_account).data["balance"],
             "35.00",
         )
+
+
+class AccountSelectorReplicaRoutingTests(SimpleTestCase):
+    """Test account selector replica routing behavior."""
+
+    @override_settings(
+        READ_REPLICA_ENABLED=True,
+        DATABASES={
+            "default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"},
+            "replica": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"},
+        },
+    )
+    def test_list_user_accounts_uses_replica_when_enabled(self):
+        """Test that list_user_accounts uses replica when read replica is enabled."""
+
+        queryset = list_user_accounts(user=User(id=1))
+
+        self.assertEqual(queryset.db, "replica")
+
+    @override_settings(READ_REPLICA_ENABLED=False)
+    def test_list_user_accounts_uses_primary_when_replica_disabled(self):
+        """Test that list_user_accounts uses primary when replica is disabled."""
+
+        queryset = list_user_accounts(user=User(id=1))
+
+        self.assertEqual(queryset.db, "default")

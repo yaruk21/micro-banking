@@ -182,7 +182,10 @@ class TransactionStatusView(generics.GenericAPIView):
     )
     def get(self, request, *args, **kwargs):
         """Handle get."""
-        transaction = list_user_transactions(user=request.user).filter(
+        transaction = list_user_transactions(
+            user=request.user,
+            force_primary=True,
+        ).filter(
             id=kwargs["pk"]
         ).first()
         if transaction is None:

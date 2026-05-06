@@ -39,6 +39,7 @@ Architecture notes:
 - PostgreSQL is the primary database for both Docker and local development
 - `transactions_transaction` is partitioned by month in PostgreSQL using `created_at`
 - Celery Beat automatically pre-creates future monthly transaction partitions
+- Safe read-only selectors can be routed to a PostgreSQL read replica when `READ_REPLICA_ENABLED=1`
 - JWT auth is provided by `djangorestframework-simplejwt`
 - Redis is connected as the Celery broker/result backend
 - Celery worker is ready for background tasks
@@ -132,6 +133,35 @@ Idempotency-Key: transfer-001
 - Internal transfer logic still uses atomic database transactions and row locking.
 - PostgreSQL keeps monthly transaction partitions plus a `DEFAULT` partition for safe write routing.
 - A scheduled transaction partition maintenance task creates future monthly partitions ahead of time.
+
+## Connection pooling rollout
+
+The app is now prepared for a PgBouncer-friendly rollout without changing code:
+
+- point `POSTGRES_HOST` and `POSTGRES_PORT` to PgBouncer for app traffic
+- enable `DB_USE_PGBOUNCER=1` to switch the default connection lifetime to a pooling-safe mode
+- keep `DB_DISABLE_SERVER_SIDE_CURSORS=1` when PgBouncer runs in `transaction` pooling mode
+- keep `POSTGRES_SSL_MODE` empty when the app talks to an internal non-TLS PgBouncer endpoint
+- use `PGBOUNCER_SERVER_TLS_SSLMODE=require` only when PgBouncer must use TLS to reach the upstream PostgreSQL server
+- keep migrations and other schema-changing release steps on the direct PostgreSQL primary instead of the pooled endpoint
+
+Recommended app env for transaction pooling:
+
+```text
+DB_USE_PGBOUNCER=1
+CONN_MAX_AGE=0
+DB_CONN_HEALTH_CHECKS=0
+DB_DISABLE_SERVER_SIDE_CURSORS=1
+POSTGRES_HOST=<pgbouncer-host>
+POSTGRES_PORT=<pgbouncer-port>
+```
+
+For the EC2 compose topology in this repository:
+
+- `pgbouncer` sits in front of PostgreSQL for `web`, `celery_worker`, and `celery_beat`
+- `migrate` still talks directly to `db:5432`
+- the pooled application path is `pgbouncer:6432`
+- `.env.ec2.example` already contains the recommended production-oriented defaults for this setup
 
 ## Transaction creation example
 
