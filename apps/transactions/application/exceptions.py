@@ -13,6 +13,11 @@ class TransactionValidationError(TransactionError):
     pass
 
 
+class TransactionLimitExceededError(TransactionValidationError):
+    """Represent transaction limit exceeded validation error."""
+    pass
+
+
 class IdempotencyConflictError(TransactionError):
     """Represent idempotency conflict error."""
     pass

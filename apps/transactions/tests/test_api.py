@@ -260,6 +260,41 @@ class TransactionApiTests(APITestCase):
         )
         self.assertEqual(Transaction.objects.count(), 0)
 
+    @override_settings(TRANSACTION_SINGLE_LIMIT_AMOUNT=Decimal("9.99"))
+    def test_transfer_returns_bad_request_when_single_limit_is_exceeded(self):
+        """API should reject transfers above the configured single-transaction limit."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000037",
+            currency=Account.Currency.USD,
+            balance=Decimal("50.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000038",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+
+        response = self.client.post(
+            reverse("transaction-list-create"),
+            {
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
+                "amount": "10.00",
+            },
+            HTTP_IDEMPOTENCY_KEY="txn-single-limit-1",
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "The single transaction limit is exceeded.",
+        )
+        self.assertEqual(Transaction.objects.count(), 0)
+
     def test_transaction_list_filter_by_account(self):
         """Test that transaction list filter by account."""
         first_account = Account.objects.create(
@@ -552,6 +587,52 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(Transaction.objects.count(), 1)
         self.assertEqual(SwiftTransferDetails.objects.count(), 1)
         self.assertEqual(first_response.data["id"], second_response.data["id"])
+
+    @override_settings(TRANSACTION_DAILY_LIMIT_AMOUNT=Decimal("30.00"))
+    def test_swift_transfer_returns_bad_request_when_daily_limit_is_exceeded(self):
+        """API should reject SWIFT transfers that would exceed the daily amount limit."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000903",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=from_account,
+            to_account=None,
+            idempotency_key="swift-api-daily-existing-1",
+            request_fingerprint="swift-api-daily-existing-1",
+            amount=Decimal("25.00"),
+            status=Transaction.Status.PENDING,
+            transfer_type=Transaction.TransferType.SWIFT,
+        )
+
+        response = self.client.post(
+            reverse("transaction-swift-create"),
+            {
+                "from_account_iban": from_account.iban,
+                "amount": "10.00",
+                "swift_code": "DEUTDEFF500",
+                "beneficiary_name": "Alice Example",
+                "beneficiary_account_number": "123456789",
+                "beneficiary_iban": "DE89370400440532013000",
+                "beneficiary_bank_name": "Deutsche Bank",
+                "beneficiary_bank_country": "DE",
+                "beneficiary_address": "Berlin, Germany",
+                "swift_reference": "invoice-limit-api-1",
+            },
+            HTTP_IDEMPOTENCY_KEY="swift-api-daily-limit-1",
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "The daily transaction limit is exceeded.",
+        )
+        self.assertEqual(Transaction.objects.count(), 1)
 
 
 class TransactionSelectorReplicaRoutingTests(SimpleTestCase):

@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.accounts.models import Account
@@ -13,6 +13,7 @@ from apps.exchange.models import ExchangeRate
 from apps.transactions.application import (
     SwiftTransferInput,
     TransferInput,
+    TransactionLimitExceededError,
     TransactionPermissionError,
     TransactionValidationError,
     create_swift_transfer,
@@ -325,6 +326,139 @@ class TransferServiceTests(TestCase):
         self.assertEqual(first_transfer.id, second_transfer.id)
         self.assertEqual(Transaction.objects.count(), 1)
         self.assertEqual(TransactionIdempotencyKey.objects.count(), 1)
+
+    @override_settings(TRANSACTION_SINGLE_LIMIT_AMOUNT=Decimal("9.99"))
+    def test_create_transfer_rejects_single_transaction_limit_exceed(self):
+        """Transfers above the configured single limit should be rejected."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000063",
+            currency=Account.Currency.USD,
+            balance=Decimal("80.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000064",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+
+        with self.assertRaisesMessage(
+            TransactionLimitExceededError,
+            "The single transaction limit is exceeded.",
+        ):
+            create_transfer(
+                transfer_input=TransferInput(
+                    user=self.user,
+                    from_account_iban=from_account.iban,
+                    to_account_iban=to_account.iban,
+                    amount=Decimal("10.00"),
+                    idempotency_key="service-single-limit-1",
+                )
+            )
+
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    @override_settings(TRANSACTION_DAILY_LIMIT_AMOUNT=Decimal("30.00"))
+    def test_create_transfer_rejects_daily_transaction_limit_exceed(self):
+        """Transfers should be rejected when the configured daily limit is exceeded."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000065",
+            currency=Account.Currency.USD,
+            balance=Decimal("80.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000066",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+        Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=from_account,
+            to_account=to_account,
+            idempotency_key="daily-limit-existing-1",
+            request_fingerprint="daily-limit-existing-1",
+            amount=Decimal("25.00"),
+            status=Transaction.Status.COMPLETED,
+            transfer_type=Transaction.TransferType.INTERNAL,
+        )
+
+        with self.assertRaisesMessage(
+            TransactionLimitExceededError,
+            "The daily transaction limit is exceeded.",
+        ):
+            create_transfer(
+                transfer_input=TransferInput(
+                    user=self.user,
+                    from_account_iban=from_account.iban,
+                    to_account_iban=to_account.iban,
+                    amount=Decimal("10.00"),
+                    idempotency_key="service-daily-limit-1",
+                )
+            )
+
+        self.assertEqual(Transaction.objects.count(), 1)
+
+    @override_settings(TRANSACTION_MONTHLY_LIMIT_AMOUNT=Decimal("50.00"))
+    def test_create_transfer_rejects_monthly_transaction_limit_exceed(self):
+        """Transfers should be rejected when the configured monthly limit is exceeded."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000067",
+            currency=Account.Currency.USD,
+            balance=Decimal("80.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000068",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+        current_month_transaction = Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=from_account,
+            to_account=to_account,
+            idempotency_key="monthly-limit-existing-1",
+            request_fingerprint="monthly-limit-existing-1",
+            amount=Decimal("45.00"),
+            status=Transaction.Status.COMPLETED,
+            transfer_type=Transaction.TransferType.INTERNAL,
+        )
+        old_transaction = Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=from_account,
+            to_account=to_account,
+            idempotency_key="monthly-limit-old-1",
+            request_fingerprint="monthly-limit-old-1",
+            amount=Decimal("45.00"),
+            status=Transaction.Status.COMPLETED,
+            transfer_type=Transaction.TransferType.INTERNAL,
+        )
+        previous_month = timezone.now().replace(day=1) - timedelta(days=1)
+        Transaction.objects.filter(id=old_transaction.id).update(
+            created_at=previous_month.replace(day=15)
+        )
+
+        with self.assertRaisesMessage(
+            TransactionLimitExceededError,
+            "The monthly transaction limit is exceeded.",
+        ):
+            create_transfer(
+                transfer_input=TransferInput(
+                    user=self.user,
+                    from_account_iban=from_account.iban,
+                    to_account_iban=to_account.iban,
+                    amount=Decimal("10.00"),
+                    idempotency_key="service-monthly-limit-1",
+                )
+            )
+
+        self.assertEqual(Transaction.objects.count(), 2)
 
     # Verifies stale recovery lookup only returns records older than the threshold.
     def test_get_stuck_transaction_ids_returns_only_stale_transactions(self):
@@ -649,3 +783,47 @@ class SwiftTransferServiceTests(TestCase):
                 is_system=True,
             ).exists()
         )
+
+    @override_settings(TRANSACTION_DAILY_LIMIT_AMOUNT=Decimal("30.00"))
+    def test_create_swift_transfer_rejects_daily_transaction_limit_exceed(self):
+        """SWIFT transfers should also respect the shared daily transaction limit."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000999",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=from_account,
+            to_account=None,
+            idempotency_key="swift-daily-existing-1",
+            request_fingerprint="swift-daily-existing-1",
+            amount=Decimal("25.00"),
+            status=Transaction.Status.PENDING,
+            transfer_type=Transaction.TransferType.SWIFT,
+        )
+
+        with self.assertRaisesMessage(
+            TransactionLimitExceededError,
+            "The daily transaction limit is exceeded.",
+        ):
+            create_swift_transfer(
+                transfer_input=SwiftTransferInput(
+                    user=self.user,
+                    from_account_iban=from_account.iban,
+                    amount=Decimal("10.00"),
+                    idempotency_key="swift-daily-limit-1",
+                    swift_code="DEUTDEFF500",
+                    beneficiary_name="Alice Example",
+                    beneficiary_account_number="123456789",
+                    beneficiary_iban="DE89370400440532013000",
+                    beneficiary_bank_name="Deutsche Bank",
+                    beneficiary_bank_country="DE",
+                    beneficiary_address="Berlin, Germany",
+                    swift_reference="invoice-limit-1",
+                )
+            )
+
+        self.assertEqual(Transaction.objects.count(), 1)

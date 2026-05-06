@@ -27,6 +27,7 @@ from .idempotency import (
     build_transfer_fingerprint,
     validate_request_fingerprint,
 )
+from .limits import enforce_transaction_limits
 from .outbox import (
     create_transaction_outbox,
     register_transaction_outbox_publish,
@@ -96,6 +97,11 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
             raise
         _log_replayed_transaction(existing_transfer)
         return existing_transfer, False
+
+    enforce_transaction_limits(
+        user=transfer_input.user,
+        amount=transfer_input.amount,
+    )
 
     (
         exchange_rate,
@@ -253,6 +259,11 @@ def create_swift_transfer(
             raise
         _log_replayed_transaction(existing_transfer)
         return existing_transfer, False
+
+    enforce_transaction_limits(
+        user=transfer_input.user,
+        amount=transfer_input.amount,
+    )
 
     created_at = timezone.now()
     scheduled_processing_at = _add_business_days(created_at, 1)

@@ -1,6 +1,7 @@
 import os
 import sys
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,6 +22,17 @@ def env_to_bool(name: str, default: bool = False) -> bool:
 def env_to_int(name: str, default: int) -> int:
     """Handle env to int."""
     return int(os.getenv(name, str(default)))
+
+
+def env_to_decimal(name: str, default: str) -> Decimal:
+    """Handle env to decimal."""
+    raw_value = os.getenv(name, default)
+    try:
+        return Decimal(str(raw_value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Environment variable {name} must be a valid decimal value."
+        ) from exc
 
 
 # Core Django environment
@@ -243,6 +255,18 @@ EXCHANGE_RATE_SYNC_INTERVAL_SECONDS = int(
     os.getenv("EXCHANGE_RATE_SYNC_INTERVAL_SECONDS", "900")
 )
 FX_EXCHANGE_FEE_RATE = os.getenv("FX_EXCHANGE_FEE_RATE", "0.01")
+TRANSACTION_SINGLE_LIMIT_AMOUNT = env_to_decimal(
+    "TRANSACTION_SINGLE_LIMIT_AMOUNT",
+    "0.00",
+)
+TRANSACTION_DAILY_LIMIT_AMOUNT = env_to_decimal(
+    "TRANSACTION_DAILY_LIMIT_AMOUNT",
+    "0.00",
+)
+TRANSACTION_MONTHLY_LIMIT_AMOUNT = env_to_decimal(
+    "TRANSACTION_MONTHLY_LIMIT_AMOUNT",
+    "0.00",
+)
 CELERY_BEAT_SCHEDULE = {
     "publish-pending-transaction-outbox": {
         "task": "apps.transactions.workers.celery_tasks.publish_pending_transaction_outbox_task",

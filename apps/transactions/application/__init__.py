@@ -6,6 +6,7 @@ from .batch import (
 from .create import create_swift_transfer, create_transfer
 from .exceptions import (
     IdempotencyConflictError,
+    TransactionLimitExceededError,
     TransactionError,
     TransactionPermissionError,
     TransactionValidationError,
@@ -23,6 +24,7 @@ from .types import BatchTransferItemInput, SwiftTransferInput, TransferInput
 __all__ = [
     "BatchTransferItemInput",
     "IdempotencyConflictError",
+    "TransactionLimitExceededError",
     "TransactionError",
     "TransactionPermissionError",
     "TransactionValidationError",
