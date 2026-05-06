@@ -54,6 +54,26 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
         close_old_connections()
         return results
 
+    def test_transaction_hot_path_indexes_exist(self):
+        with connection.cursor() as cursor:
+            constraints = connection.introspection.get_constraints(
+                cursor,
+                Transaction._meta.db_table,
+            )
+
+        self.assertIn("transaction_from_created_idx", constraints)
+        self.assertIn("transaction_to_created_idx", constraints)
+        self.assertIn("txn_status_created_idx", constraints)
+        self.assertIn("txn_status_proc_started_idx", constraints)
+        self.assertEqual(
+            constraints["txn_status_created_idx"]["columns"],
+            ["status", "created_at"],
+        )
+        self.assertEqual(
+            constraints["txn_status_proc_started_idx"]["columns"],
+            ["status", "processing_started_at"],
+        )
+
     def test_concurrent_create_transfer_reuses_single_transaction(self):
         from_account = Account.objects.create(
             owner=self.user,

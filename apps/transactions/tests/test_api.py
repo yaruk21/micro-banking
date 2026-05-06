@@ -1,11 +1,14 @@
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import Account
+from apps.accounts.services import SYSTEM_ACCOUNT_USERNAME
+from apps.exchange.models import ExchangeRate
 from apps.transactions.models import Transaction
 
 User = get_user_model()
@@ -13,6 +16,7 @@ User = get_user_model()
 
 class TransactionApiTests(APITestCase):
     def setUp(self):
+        cache.clear()
         self.user = User.objects.create_user(username="alice", password="testpass123")
         self.other_user = User.objects.create_user(username="bob", password="testpass123")
         self.client.force_authenticate(user=self.user)
@@ -53,17 +57,83 @@ class TransactionApiTests(APITestCase):
             Transaction.objects.get().status,
             Transaction.Status.COMPLETED,
         )
+        self.assertEqual(
+            Transaction.objects.get().credited_amount,
+            Decimal("25.00"),
+        )
+        self.assertEqual(
+            Transaction.objects.get().fee_amount,
+            Decimal("0.00"),
+        )
+
+    def test_cross_currency_transfer_uses_exchange_rate(self):
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000021",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000022",
+            currency=Account.Currency.EUR,
+            balance=Decimal("10.00"),
+        )
+        ExchangeRate.objects.create(
+            base_currency="USD",
+            quote_currency="UAH",
+            rate=Decimal("40.00000000"),
+            provider="privatbank",
+            fetched_at="2026-05-05T12:00:00Z",
+        )
+        ExchangeRate.objects.create(
+            base_currency="EUR",
+            quote_currency="UAH",
+            rate=Decimal("50.00000000"),
+            provider="privatbank",
+            fetched_at="2026-05-05T12:00:00Z",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("transaction-list-create"),
+                {
+                    "from_account_iban": from_account.iban,
+                    "to_account_iban": to_account.iban,
+                    "amount": "25.00",
+                },
+                HTTP_IDEMPOTENCY_KEY="txn-fx-1",
+                format="json",
+            )
+
+        from_account.refresh_from_db()
+        to_account.refresh_from_db()
+        fee_account = Account.objects.get(
+            currency=Account.Currency.EUR,
+            is_system=True,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(from_account.balance, Decimal("75.00"))
+        self.assertEqual(to_account.balance, Decimal("29.80"))
+        self.assertEqual(fee_account.balance, Decimal("0.20"))
+        self.assertEqual(fee_account.owner.username, SYSTEM_ACCOUNT_USERNAME)
+        self.assertEqual(Transaction.objects.get().status, Transaction.Status.COMPLETED)
+        self.assertEqual(response.data["credited_amount"], "19.80")
+        self.assertEqual(response.data["exchange_rate"], "0.80000000")
+        self.assertEqual(response.data["fee_amount"], "0.20")
+        self.assertEqual(response.data["fee_currency"], "EUR")
 
     def test_transfer_fails_with_insufficient_balance(self):
         from_account = Account.objects.create(
             owner=self.user,
-            iban="MBA00000000000000000000000000021",
+            iban="MBA00000000000000000000000000023",
             currency=Account.Currency.USD,
             balance=Decimal("5.00"),
         )
         to_account = Account.objects.create(
             owner=self.other_user,
-            iban="MBB00000000000000000000000000022",
+            iban="MBB00000000000000000000000000024",
             currency=Account.Currency.USD,
             balance=Decimal("0.00"),
         )
@@ -87,6 +157,38 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(from_account.balance, Decimal("5.00"))
         self.assertEqual(to_account.balance, Decimal("0.00"))
         self.assertEqual(Transaction.objects.get().status, Transaction.Status.FAILED)
+
+    def test_cross_currency_transfer_fails_when_exchange_rate_is_missing(self):
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000025",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000026",
+            currency=Account.Currency.EUR,
+            balance=Decimal("10.00"),
+        )
+
+        response = self.client.post(
+            reverse("transaction-list-create"),
+            {
+                "from_account_iban": from_account.iban,
+                "to_account_iban": to_account.iban,
+                "amount": "25.00",
+            },
+            HTTP_IDEMPOTENCY_KEY="txn-fx-missing-1",
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Exchange rate for USD->EUR is not available.",
+        )
+        self.assertEqual(Transaction.objects.count(), 0)
 
     def test_transfer_fails_for_foreign_sender_account(self):
         from_account = Account.objects.create(

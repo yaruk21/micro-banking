@@ -31,7 +31,15 @@ class TransactionCreateSerializer(serializers.Serializer):
 
 class TransactionReadSerializer(serializers.ModelSerializer):
     from_account_iban = serializers.CharField(source="from_account.iban", read_only=True)
+    from_account_currency = serializers.CharField(
+        source="from_account.currency",
+        read_only=True,
+    )
     to_account_iban = serializers.CharField(source="to_account.iban", read_only=True)
+    to_account_currency = serializers.CharField(
+        source="to_account.currency",
+        read_only=True,
+    )
 
     class Meta:
         model = Transaction
@@ -39,9 +47,16 @@ class TransactionReadSerializer(serializers.ModelSerializer):
             "id",
             "from_account",
             "from_account_iban",
+            "from_account_currency",
             "to_account",
             "to_account_iban",
+            "to_account_currency",
             "amount",
+            "credited_amount",
+            "exchange_rate",
+            "exchange_rate_provider",
+            "fee_amount",
+            "fee_currency",
             "status",
             "created_at",
             "processing_started_at",

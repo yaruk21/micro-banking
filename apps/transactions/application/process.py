@@ -1,8 +1,11 @@
 import logging
+from decimal import Decimal
 
 from django.db import transaction as db_transaction
 from django.utils import timezone
 
+from apps.accounts.cache import refresh_account_balance_cache
+from apps.accounts.services import get_or_create_system_account
 from apps.accounts.models import Account
 from apps.transactions.models import Transaction
 from apps.transactions.realtime import publish_transaction_status_update
@@ -12,6 +15,7 @@ from .cache_versions import (
     bump_failed_transaction_caches,
     bump_transfer_related_caches,
 )
+from .exchange import resolve_transfer_conversion
 from .exceptions import TransactionValidationError
 
 logger = logging.getLogger("apps.transactions")
@@ -72,6 +76,7 @@ def process_transfer(*, transaction_id: int) -> Transaction:
 
         locked_from_account = locked_accounts[transfer.from_account_id]
         locked_to_account = locked_accounts[transfer.to_account_id]
+        fee_account = None
 
         if locked_from_account.id == locked_to_account.id:
             return _fail_transfer(
@@ -79,11 +84,39 @@ def process_transfer(*, transaction_id: int) -> Transaction:
                 reason="Sender and recipient accounts must be different.",
             )
 
-        if locked_from_account.currency != locked_to_account.currency:
-            return _fail_transfer(
-                transfer=transfer,
-                reason="Transfers are allowed only between accounts with the same currency.",
+        if transfer.exchange_rate is None or transfer.credited_amount is None:
+            (
+                transfer.exchange_rate,
+                transfer.credited_amount,
+                transfer.fee_amount,
+                transfer.fee_currency,
+                transfer.exchange_rate_provider,
+            ) = resolve_transfer_conversion(
+                from_account=locked_from_account,
+                to_account=locked_to_account,
+                amount=transfer.amount,
             )
+            transfer.save(
+                update_fields=[
+                    "exchange_rate",
+                    "credited_amount",
+                    "fee_amount",
+                    "fee_currency",
+                    "exchange_rate_provider",
+                ]
+            )
+        if (transfer.fee_amount or Decimal("0.00")) > Decimal("0.00"):
+            fee_account = get_or_create_system_account(currency=locked_to_account.currency)
+            fee_account = (
+                Account.objects.select_for_update()
+                .filter(id=fee_account.id)
+                .first()
+            )
+            if fee_account is None:
+                return _fail_transfer(
+                    transfer=transfer,
+                    reason="System fee account is not available.",
+                )
 
         if locked_from_account.balance < transfer.amount:
             return _fail_transfer(
@@ -92,10 +125,14 @@ def process_transfer(*, transaction_id: int) -> Transaction:
             )
 
         locked_from_account.balance -= transfer.amount
-        locked_to_account.balance += transfer.amount
+        locked_to_account.balance += transfer.credited_amount
+        if fee_account is not None:
+            fee_account.balance += transfer.fee_amount
 
         locked_from_account.save(update_fields=["balance"])
         locked_to_account.save(update_fields=["balance"])
+        if fee_account is not None:
+            fee_account.save(update_fields=["balance"])
 
         transfer.status = Transaction.Status.COMPLETED
         transfer.completed_at = timezone.now()
@@ -119,6 +156,8 @@ def process_transfer(*, transaction_id: int) -> Transaction:
         from_account=locked_from_account,
         to_account=locked_to_account,
     )
+    if fee_account is not None:
+        refresh_account_balance_cache(account=fee_account)
     publish_transaction_status_update(transaction_id=transfer.id)
     return transfer
 

@@ -194,6 +194,7 @@ TRANSACTION_RECOVERY_INTERVAL_SECONDS = int(
 EXCHANGE_RATE_SYNC_INTERVAL_SECONDS = int(
     os.getenv("EXCHANGE_RATE_SYNC_INTERVAL_SECONDS", "900")
 )
+FX_EXCHANGE_FEE_RATE = os.getenv("FX_EXCHANGE_FEE_RATE", "0.01")
 CELERY_BEAT_SCHEDULE = {
     "publish-pending-transaction-outbox": {
         "task": "apps.transactions.workers.celery_tasks.publish_pending_transaction_outbox_task",

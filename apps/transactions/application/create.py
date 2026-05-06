@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 from django.db import IntegrityError, transaction as db_transaction
 
 from apps.accounts.models import Account
@@ -12,6 +13,7 @@ from .exceptions import (
     TransactionPermissionError,
     TransactionValidationError,
 )
+from .exchange import resolve_transfer_conversion
 from .idempotency import build_transfer_fingerprint, validate_request_fingerprint
 from .outbox import (
     create_transaction_outbox,
@@ -71,6 +73,20 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
         _log_replayed_transaction(existing_transfer)
         return existing_transfer, False
 
+    (
+        exchange_rate,
+        credited_amount,
+        fee_amount,
+        fee_currency,
+        exchange_rate_provider,
+    ) = (
+        resolve_transfer_conversion(
+            from_account=from_account,
+            to_account=to_account,
+            amount=transfer_input.amount,
+        )
+    )
+
     try:
         with db_transaction.atomic():
             transfer = Transaction.objects.create(
@@ -80,6 +96,11 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
                 idempotency_key=effective_idempotency_key,
                 request_fingerprint=request_fingerprint,
                 amount=transfer_input.amount,
+                credited_amount=credited_amount,
+                exchange_rate=exchange_rate,
+                exchange_rate_provider=exchange_rate_provider,
+                fee_amount=fee_amount,
+                fee_currency=fee_currency,
                 status=Transaction.Status.PENDING,
             )
             outbox = create_transaction_outbox(transaction=transfer)

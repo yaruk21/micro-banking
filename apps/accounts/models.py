@@ -14,6 +14,7 @@ class Account(models.Model):
     iban = models.CharField(max_length=34, unique=True, db_index=True)
     balance = models.DecimalField(max_digits=18, decimal_places=2, default=Decimal("0.00"))
     currency = models.CharField(max_length=3, choices=Currency.choices)
+    is_system = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
@@ -22,11 +23,17 @@ class Account(models.Model):
             models.CheckConstraint(
                 check=models.Q(balance__gte=0),
                 name="account_balance_non_negative",
-            )
+            ),
+            models.UniqueConstraint(
+                fields=("currency",),
+                condition=models.Q(is_system=True),
+                name="unique_system_account_per_currency",
+            ),
         ]
 
     def __str__(self) -> str:
-        return f"{self.iban} ({self.currency})"
+        system_label = " system" if self.is_system else ""
+        return f"{self.iban} ({self.currency}{system_label})"
 
     @property
     def cached_balance(self) -> Decimal:

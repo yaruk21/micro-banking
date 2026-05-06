@@ -29,6 +29,26 @@ class Transaction(models.Model):
     idempotency_key = models.CharField(max_length=255)
     request_fingerprint = models.CharField(max_length=255)
     amount = models.DecimalField(max_digits=18, decimal_places=2)
+    credited_amount = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    exchange_rate = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        null=True,
+        blank=True,
+    )
+    exchange_rate_provider = models.CharField(max_length=50, blank=True)
+    fee_amount = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    fee_currency = models.CharField(max_length=3, blank=True)
     status = models.CharField(max_length=10, choices=Status.choices, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     processing_started_at = models.DateTimeField(null=True, blank=True)
@@ -47,6 +67,14 @@ class Transaction(models.Model):
                 fields=("to_account", "created_at"),
                 name="transaction_to_created_idx",
             ),
+            models.Index(
+                fields=("status", "created_at"),
+                name="txn_status_created_idx",
+            ),
+            models.Index(
+                fields=("status", "processing_started_at"),
+                name="txn_status_proc_started_idx",
+            ),
         ]
         constraints = [
             models.CheckConstraint(
@@ -60,7 +88,10 @@ class Transaction(models.Model):
         ]
 
     def __str__(self) -> str:
-        return f"{self.from_account_id}->{self.to_account_id}:{self.amount}"
+        return (
+            f"{self.from_account_id}->{self.to_account_id}:"
+            f"{self.amount}/{self.credited_amount or self.amount}"
+        )
 
 
 class TransactionBatch(models.Model):

@@ -3,13 +3,17 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase
 from django.utils import timezone
 
 from apps.accounts.models import Account
+from apps.accounts.services import SYSTEM_ACCOUNT_USERNAME
+from apps.exchange.models import ExchangeRate
 from apps.transactions.application import (
     TransferInput,
     TransactionPermissionError,
+    TransactionValidationError,
     create_transfer,
     get_stuck_transaction_ids,
     process_transfer,
@@ -22,6 +26,7 @@ User = get_user_model()
 
 class TransferServiceTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.user = User.objects.create_user(username="service-alice", password="pass123")
         self.other_user = User.objects.create_user(
             username="service-bob",
@@ -61,6 +66,11 @@ class TransferServiceTests(TestCase):
         self.assertEqual(transfer.status, Transaction.Status.COMPLETED)
         self.assertEqual(from_account.balance, Decimal("100.00"))
         self.assertEqual(to_account.balance, Decimal("50.00"))
+        self.assertEqual(transfer.exchange_rate, Decimal("1.00000000"))
+        self.assertEqual(transfer.credited_amount, Decimal("20.00"))
+        self.assertEqual(transfer.fee_amount, Decimal("0.00"))
+        self.assertEqual(transfer.fee_currency, Account.Currency.USD)
+        self.assertEqual(transfer.exchange_rate_provider, "internal")
 
     def test_create_transfer_fails_with_insufficient_balance(self):
         from_account = Account.objects.create(
@@ -96,7 +106,7 @@ class TransferServiceTests(TestCase):
         self.assertEqual(Transaction.objects.count(), 1)
         self.assertEqual(transfer.status, Transaction.Status.FAILED)
 
-    def test_create_transfer_fails_when_currency_differs(self):
+    def test_create_transfer_converts_amount_when_currency_differs(self):
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBS00000000000000000000000000031",
@@ -108,6 +118,20 @@ class TransferServiceTests(TestCase):
             iban="MBS00000000000000000000000000032",
             currency=Account.Currency.EUR,
             balance=Decimal("10.00"),
+        )
+        ExchangeRate.objects.create(
+            base_currency="USD",
+            quote_currency="UAH",
+            rate=Decimal("40.00000000"),
+            provider="privatbank",
+            fetched_at=timezone.now(),
+        )
+        ExchangeRate.objects.create(
+            base_currency="EUR",
+            quote_currency="UAH",
+            rate=Decimal("50.00000000"),
+            provider="privatbank",
+            fetched_at=timezone.now(),
         )
 
         transfer, created = create_transfer(
@@ -121,10 +145,51 @@ class TransferServiceTests(TestCase):
         )
         self.assertTrue(created)
         process_transfer(transaction_id=transfer.id)
+        from_account.refresh_from_db()
+        to_account.refresh_from_db()
         transfer.refresh_from_db()
+        fee_account = Account.objects.get(
+            currency=Account.Currency.EUR,
+            is_system=True,
+        )
         self.assertEqual(Transaction.objects.count(), 1)
-        self.assertEqual(transfer.status, Transaction.Status.FAILED)
-        self.assertIn("same currency", transfer.failure_reason)
+        self.assertEqual(transfer.status, Transaction.Status.COMPLETED)
+        self.assertEqual(transfer.exchange_rate, Decimal("0.80000000"))
+        self.assertEqual(transfer.credited_amount, Decimal("11.88"))
+        self.assertEqual(transfer.fee_amount, Decimal("0.12"))
+        self.assertEqual(transfer.fee_currency, Account.Currency.EUR)
+        self.assertEqual(from_account.balance, Decimal("35.00"))
+        self.assertEqual(to_account.balance, Decimal("21.88"))
+        self.assertEqual(fee_account.balance, Decimal("0.12"))
+        self.assertEqual(fee_account.owner.username, SYSTEM_ACCOUNT_USERNAME)
+
+    def test_create_transfer_fails_when_exchange_rate_is_missing(self):
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000033",
+            currency=Account.Currency.USD,
+            balance=Decimal("50.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBS00000000000000000000000000034",
+            currency=Account.Currency.EUR,
+            balance=Decimal("10.00"),
+        )
+
+        with self.assertRaisesMessage(
+            TransactionValidationError,
+            "Exchange rate for USD->EUR is not available.",
+        ):
+            create_transfer(
+                transfer_input=TransferInput(
+                    user=self.user,
+                    from_account_iban=from_account.iban,
+                    to_account_iban=to_account.iban,
+                    amount=Decimal("15.00"),
+                    idempotency_key="service-failed-3",
+                )
+            )
 
     def test_create_transfer_fails_for_foreign_sender_account(self):
         from_account = Account.objects.create(
