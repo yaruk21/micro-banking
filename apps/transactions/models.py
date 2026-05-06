@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.validators import RegexValidator
 from django.db import models
 
 
@@ -17,6 +18,12 @@ class Transaction(models.Model):
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
 
+    class TransferType(models.TextChoices):
+        """Supported transfer rails."""
+
+        INTERNAL = "internal", "Internal"
+        SWIFT = "swift", "Swift"
+
     from_account = models.ForeignKey(
         "accounts.Account",
         on_delete=models.PROTECT,
@@ -31,6 +38,8 @@ class Transaction(models.Model):
         "accounts.Account",
         on_delete=models.PROTECT,
         related_name="incoming_transactions",
+        null=True,
+        blank=True,
     )
     idempotency_key = models.CharField(max_length=255)
     request_fingerprint = models.CharField(max_length=255)
@@ -56,11 +65,11 @@ class Transaction(models.Model):
     )
     fee_currency = models.CharField(max_length=3, blank=True)
     status = models.CharField(max_length=10, choices=Status.choices)
+    transfer_type = models.CharField(max_length=10, choices=TransferType.choices,default=TransferType.INTERNAL, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     processing_started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     failure_reason = models.TextField(blank=True)
-
 
     class Meta:
         """Represent meta."""
@@ -100,14 +109,22 @@ class Transaction(models.Model):
                 check=models.Q(amount__gt=Decimal("0.00")),
                 name="transaction_amount_positive",
             ),
+            models.CheckConstraint(
+                check=~models.Q(
+                    transfer_type="internal",
+                    to_account__isnull=True,
+                ),
+                name="txn_internal_requires_to_account",
+            ),
         ]
 
     # Returns a compact admin/debug label for the transfer.
     def __str__(self) -> str:
         """Return a short human-readable representation of the transaction."""
 
+        recipient = self.to_account_id or "external"
         return (
-            f"{self.from_account_id}->{self.to_account_id}:"
+            f"{self.from_account_id}->{recipient}:"
             f"{self.amount}/{self.credited_amount or self.amount}"
         )
 
@@ -132,11 +149,7 @@ class TransactionBatch(models.Model):
     )
     idempotency_key = models.CharField(max_length=255)
     request_fingerprint = models.CharField(max_length=255)
-    status = models.CharField(
-        max_length=10,
-        choices=Status.choices,
-        db_index=True,
-    )
+    status = models.CharField(max_length=10, choices=Status.choices, db_index=True,)
     total_items = models.PositiveIntegerField(default=0)
     processed_items = models.PositiveIntegerField(default=0)
     succeeded_items = models.PositiveIntegerField(default=0)
@@ -278,3 +291,72 @@ class TransactionIdempotencyKey(models.Model):
             f"txn_idem:{self.initiated_by_id}:{self.idempotency_key}:"
             f"{self.transaction_id}"
         )
+
+
+SWIFT_CODE_VALIDATOR = RegexValidator(
+    regex=r"^[A-Z0-9]{8}([A-Z0-9]{3})?$",
+    message="SWIFT code must contain 8 or 11 uppercase letters and digits.",
+)
+COUNTRY_CODE_VALIDATOR = RegexValidator(
+    regex=r"^[A-Z]{2}$",
+    message="Bank country must be a 2-letter ISO country code.",
+)
+IBAN_VALIDATOR = RegexValidator(
+    regex=r"^[A-Z0-9]{15,34}$",
+    message="IBAN must contain 15 to 34 uppercase letters and digits.",
+)
+
+
+class SwiftTransferDetails(models.Model):
+    """Stores SWIFT-specific recipient and settlement metadata for one transfer."""
+
+    transaction = models.OneToOneField(Transaction, on_delete=models.CASCADE, related_name="swift_details",db_constraint=False,)
+    swift_code = models.CharField(max_length=11, validators=[SWIFT_CODE_VALIDATOR], db_index=True)
+    beneficiary_name = models.CharField(max_length=255, db_index=True)
+    beneficiary_account_number = models.CharField(max_length=34)
+    beneficiary_iban = models.CharField(max_length=34, blank=True, validators=[IBAN_VALIDATOR])
+    beneficiary_bank_name = models.CharField(max_length=255, db_index=True)
+    beneficiary_bank_country = models.CharField(max_length=2, validators=[COUNTRY_CODE_VALIDATOR],db_index=True)
+    beneficiary_address = models.TextField(blank=True)
+    swift_reference = models.CharField(max_length=64, blank=True, db_index=True)
+    scheduled_processing_at = models.DateTimeField(null=True, blank=True, db_index=True,)
+    expected_completion_at = models.DateTimeField(null=True, blank=True, db_index=True,)
+    swift_fee_fixed = models.DecimalField(max_digits=18, decimal_places=2, default=Decimal("10.00"))
+    swift_fee_rate = models.DecimalField(max_digits=6, decimal_places=4, default=Decimal("0.0100"),)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        """Represent meta."""
+
+        ordering = ("-created_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(swift_fee_fixed__gte=Decimal("0.00")),
+                name="swift_details_fee_fixed_non_negative",
+            ),
+            models.CheckConstraint(
+                check=models.Q(swift_fee_rate__gte=Decimal("0.0000")),
+                name="swift_details_fee_rate_non_negative",
+            ),
+            models.CheckConstraint(
+                check=models.Q(swift_fee_rate__lte=Decimal("1.0000")),
+                name="swift_details_fee_rate_lte_one",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        """Normalize canonical SWIFT fields before persisting."""
+
+        self.swift_code = self.swift_code.replace(" ", "").upper().strip()
+        self.beneficiary_account_number = (
+            self.beneficiary_account_number.replace(" ", "").upper().strip()
+        )
+        self.beneficiary_iban = self.beneficiary_iban.replace(" ", "").upper().strip()
+        self.beneficiary_bank_country = self.beneficiary_bank_country.upper().strip()
+        self.swift_reference = self.swift_reference.strip()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        """Return a short human-readable representation of the SWIFT transfer."""
+
+        return f"swift:{self.transaction_id}:{self.swift_code}"

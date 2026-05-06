@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -11,14 +11,22 @@ from apps.accounts.models import Account
 from apps.accounts.services import SYSTEM_ACCOUNT_USERNAME
 from apps.exchange.models import ExchangeRate
 from apps.transactions.application import (
+    SwiftTransferInput,
     TransferInput,
     TransactionPermissionError,
     TransactionValidationError,
+    create_swift_transfer,
     create_transfer,
+    get_due_swift_transaction_ids,
     get_stuck_transaction_ids,
     process_transfer,
+    process_swift_transfer,
 )
-from apps.transactions.models import Transaction, TransactionIdempotencyKey
+from apps.transactions.models import (
+    SwiftTransferDetails,
+    Transaction,
+    TransactionIdempotencyKey,
+)
 from apps.transactions.workers.celery_tasks import recover_stuck_transfers_task
 
 User = get_user_model()
@@ -402,4 +410,242 @@ class TransferServiceTests(TestCase):
         mock_delay.assert_called_once_with(
             stale_transaction.id,
             correlation_id=None,
+        )
+
+
+class SwiftTransferServiceTests(TestCase):
+    """Validate delayed SWIFT scheduling, pickup, and processing behavior."""
+
+    def setUp(self):
+        """Prepare a clean cache and baseline user for SWIFT tests."""
+
+        cache.clear()
+        self.user = User.objects.create_user(username="swift-alice", password="pass123")
+
+    def _create_swift_transfer(self, *, amount: str = "25.00") -> Transaction:
+        """Create one SWIFT transfer for service-layer tests."""
+
+        unique_suffix = Account.objects.count() + 1
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban=f"MBS00000000000000000000000009{unique_suffix:03d}",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        transfer, created = create_swift_transfer(
+            transfer_input=SwiftTransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                amount=Decimal(amount),
+                idempotency_key=f"swift-service-{amount}-{unique_suffix}",
+                swift_code="DEUTDEFF500",
+                beneficiary_name="Alice Example",
+                beneficiary_account_number="123456789",
+                beneficiary_iban="DE89370400440532013000",
+                beneficiary_bank_name="Deutsche Bank",
+                beneficiary_bank_country="DE",
+                beneficiary_address="Berlin, Germany",
+                swift_reference="invoice-77",
+            )
+        )
+        self.assertTrue(created)
+        return transfer
+
+    @patch(
+        "apps.transactions.application.create._get_swift_completion_business_days",
+        return_value=3,
+    )
+    def test_create_swift_transfer_schedules_next_business_days(
+        self,
+        mock_completion_days,
+    ):
+        """Friday submissions should skip the weekend for SWIFT planning dates."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000902",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        friday = datetime(2026, 5, 8, 12, 0, tzinfo=dt_timezone.utc)
+
+        with patch("apps.transactions.application.create.timezone.now", return_value=friday):
+            transfer, created = create_swift_transfer(
+                transfer_input=SwiftTransferInput(
+                    user=self.user,
+                    from_account_iban=from_account.iban,
+                    amount=Decimal("25.00"),
+                    idempotency_key="swift-schedule-1",
+                    swift_code="DEUTDEFF500",
+                    beneficiary_name="Alice Example",
+                    beneficiary_account_number="123456789",
+                    beneficiary_iban="DE89370400440532013000",
+                    beneficiary_bank_name="Deutsche Bank",
+                    beneficiary_bank_country="DE",
+                    beneficiary_address="Berlin, Germany",
+                    swift_reference="invoice-88",
+                )
+            )
+
+        self.assertTrue(created)
+        swift_details = transfer.swift_details
+        self.assertEqual(
+            swift_details.scheduled_processing_at,
+            datetime(2026, 5, 11, 12, 0, tzinfo=dt_timezone.utc),
+        )
+        self.assertEqual(
+            swift_details.expected_completion_at,
+            datetime(2026, 5, 13, 12, 0, tzinfo=dt_timezone.utc),
+        )
+        mock_completion_days.assert_called_once()
+
+    def test_get_due_swift_transaction_ids_returns_due_pending_and_processing_transfers(self):
+        """The due selector should return SWIFT items ready to start or finish."""
+
+        due_transfer = self._create_swift_transfer(amount="25.00")
+        completion_due_transfer = self._create_swift_transfer(amount="30.00")
+        future_transfer = self._create_swift_transfer(amount="35.00")
+        internal_sender = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000903",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        internal_recipient = Account.objects.create(
+            owner=User.objects.create_user(username="swift-bob", password="pass123"),
+            iban="MBS00000000000000000000000000904",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+        internal_transfer = Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=internal_sender,
+            to_account=internal_recipient,
+            idempotency_key="swift-due-internal",
+            request_fingerprint="swift-due-internal",
+            amount=Decimal("5.00"),
+            status=Transaction.Status.PENDING,
+            transfer_type=Transaction.TransferType.INTERNAL,
+        )
+
+        Transaction.objects.filter(id=due_transfer.id).update(status=Transaction.Status.PENDING)
+        Transaction.objects.filter(id=completion_due_transfer.id).update(
+            status=Transaction.Status.PROCESSING
+        )
+        SwiftTransferDetails.objects.filter(transaction_id=due_transfer.id).update(
+            scheduled_processing_at=timezone.now() - timedelta(minutes=5)
+        )
+        SwiftTransferDetails.objects.filter(
+            transaction_id=completion_due_transfer.id
+        ).update(
+            expected_completion_at=timezone.now() - timedelta(minutes=1)
+        )
+        SwiftTransferDetails.objects.filter(transaction_id=future_transfer.id).update(
+            scheduled_processing_at=timezone.now() + timedelta(minutes=5)
+        )
+
+        due_ids = get_due_swift_transaction_ids(limit=10)
+
+        self.assertEqual(len(due_ids), 2)
+        self.assertCountEqual(
+            due_ids,
+            [due_transfer.id, completion_due_transfer.id],
+        )
+        self.assertNotIn(future_transfer.id, due_ids)
+        self.assertNotIn(internal_transfer.id, due_ids)
+
+    def test_process_swift_transfer_moves_due_transfer_to_processing_before_completion(
+        self,
+    ):
+        """Due scheduled SWIFT transfer should enter processing before settlement day."""
+
+        transfer = self._create_swift_transfer(amount="25.00")
+        from_account = transfer.from_account
+        SwiftTransferDetails.objects.filter(transaction_id=transfer.id).update(
+            scheduled_processing_at=timezone.now() - timedelta(minutes=5),
+            expected_completion_at=timezone.now() + timedelta(days=2),
+        )
+
+        processed_transfer = process_swift_transfer(transaction_id=transfer.id)
+        from_account.refresh_from_db()
+        processed_transfer.refresh_from_db()
+
+        self.assertEqual(processed_transfer.status, Transaction.Status.PROCESSING)
+        self.assertEqual(from_account.balance, Decimal("100.00"))
+        self.assertIsNone(processed_transfer.completed_at)
+
+    def test_process_swift_transfer_completes_due_processing_transfer_and_posts_fee(self):
+        """Due SWIFT settlement should debit sender funds and credit the fee account."""
+
+        transfer = self._create_swift_transfer(amount="25.00")
+        SwiftTransferDetails.objects.filter(transaction_id=transfer.id).update(
+            scheduled_processing_at=timezone.now() - timedelta(days=2),
+            expected_completion_at=timezone.now() - timedelta(minutes=5),
+        )
+        Transaction.objects.filter(id=transfer.id).update(
+            status=Transaction.Status.PROCESSING,
+            processing_started_at=timezone.now() - timedelta(days=1),
+        )
+
+        processed_transfer = process_swift_transfer(transaction_id=transfer.id)
+        from_account = processed_transfer.from_account
+        from_account.refresh_from_db()
+        processed_transfer.refresh_from_db()
+        fee_account = Account.objects.get(
+            currency=Account.Currency.USD,
+            is_system=True,
+        )
+
+        self.assertEqual(processed_transfer.status, Transaction.Status.COMPLETED)
+        self.assertEqual(from_account.balance, Decimal("64.75"))
+        self.assertEqual(fee_account.balance, Decimal("10.25"))
+        self.assertIsNotNone(processed_transfer.completed_at)
+
+    def test_process_swift_transfer_fails_when_balance_cannot_cover_fee(self):
+        """SWIFT settlement should fail when sender funds cannot cover amount plus fee."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBS00000000000000000000000000905",
+            currency=Account.Currency.USD,
+            balance=Decimal("30.00"),
+        )
+        transfer, created = create_swift_transfer(
+            transfer_input=SwiftTransferInput(
+                user=self.user,
+                from_account_iban=from_account.iban,
+                amount=Decimal("25.00"),
+                idempotency_key="swift-insufficient-1",
+                swift_code="DEUTDEFF500",
+                beneficiary_name="Alice Example",
+                beneficiary_account_number="123456789",
+                beneficiary_iban="DE89370400440532013000",
+                beneficiary_bank_name="Deutsche Bank",
+                beneficiary_bank_country="DE",
+                beneficiary_address="Berlin, Germany",
+                swift_reference="invoice-99",
+            )
+        )
+        self.assertTrue(created)
+        SwiftTransferDetails.objects.filter(transaction_id=transfer.id).update(
+            scheduled_processing_at=timezone.now() - timedelta(days=2),
+            expected_completion_at=timezone.now() - timedelta(minutes=5),
+        )
+        Transaction.objects.filter(id=transfer.id).update(
+            status=Transaction.Status.PROCESSING,
+            processing_started_at=timezone.now() - timedelta(days=1),
+        )
+
+        processed_transfer = process_swift_transfer(transaction_id=transfer.id)
+        from_account.refresh_from_db()
+        processed_transfer.refresh_from_db()
+
+        self.assertEqual(processed_transfer.status, Transaction.Status.FAILED)
+        self.assertEqual(from_account.balance, Decimal("30.00"))
+        self.assertIn("cover SWIFT amount and fee", processed_transfer.failure_reason)
+        self.assertFalse(
+            Account.objects.filter(
+                currency=Account.Currency.USD,
+                is_system=True,
+            ).exists()
         )

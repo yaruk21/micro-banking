@@ -5,11 +5,13 @@ from celery import shared_task
 from django.conf import settings
 
 from apps.transactions.application import (
+    get_due_swift_transaction_ids,
     get_stuck_transaction_ids,
     mark_transaction_batch_failed,
     publish_pending_transaction_outbox,
     process_transaction_batch,
     process_transfer,
+    process_swift_transfer,
 )
 from apps.transactions.partitioning import ensure_transaction_partitions
 from core.logging_context import (
@@ -41,6 +43,35 @@ def publish_pending_transaction_outbox_task(self, limit: Optional[int] = None) -
                 task_id=self.request.id,
             )
         return published_count
+    finally:
+        reset_task_id(task_token)
+
+
+@shared_task(bind=True)
+def dispatch_due_swift_transfers_task(self, limit: Optional[int] = None) -> int:
+    """Dispatch due SWIFT transfers to the dedicated processing task."""
+    task_token = set_task_id(self.request.id)
+    try:
+        transaction_ids = get_due_swift_transaction_ids(
+            limit=limit or settings.SWIFT_TRANSFER_PICKUP_BATCH_SIZE
+        )
+        for transaction_id in transaction_ids:
+            process_swift_transfer_task.delay(
+                transaction_id,
+                correlation_id=self.request.id,
+            )
+
+        if transaction_ids:
+            log_event(
+                logger,
+                logging.INFO,
+                "transaction.swift_due_dispatch_scheduled",
+                message="Due SWIFT transfers were dispatched for processing.",
+                transaction_ids=transaction_ids,
+                count=len(transaction_ids),
+                task_id=self.request.id,
+            )
+        return len(transaction_ids)
     finally:
         reset_task_id(task_token)
 
@@ -118,6 +149,49 @@ def process_transfer_task(
             logging.INFO,
             "transaction.task_finished",
             message="Transaction processing task finished.",
+            transaction_id=transaction_id,
+            task_id=self.request.id,
+            status=transfer.status,
+            idempotency_key=transfer.idempotency_key,
+        )
+    finally:
+        reset_task_id(task_token)
+        reset_correlation_id(correlation_token)
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 5},
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def process_swift_transfer_task(
+    self,
+    transaction_id: int,
+    correlation_id: Optional[str] = None,
+) -> None:
+    """Process one due SWIFT transfer."""
+    correlation_token = set_correlation_id(correlation_id)
+    task_token = set_task_id(self.request.id)
+    try:
+        log_event(
+            logger,
+            logging.INFO,
+            "transaction.swift_task_started",
+            message="SWIFT transaction processing task started.",
+            transaction_id=transaction_id,
+            task_id=self.request.id,
+        )
+        transfer = process_swift_transfer(transaction_id=transaction_id)
+        log_event(
+            logger,
+            logging.INFO,
+            "transaction.swift_task_finished",
+            message="SWIFT transaction processing task finished.",
             transaction_id=transaction_id,
             task_id=self.request.id,
             status=transfer.status,

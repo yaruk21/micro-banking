@@ -4,11 +4,13 @@ from .views import (
     TransactionBatchCreateView,
     TransactionBatchStatusView,
     TransactionListCreateView,
+    TransactionSwiftCreateView,
     TransactionStatusView,
 )
 
 urlpatterns = [
     path("", TransactionListCreateView.as_view(), name="transaction-list-create"),
+    path("swift/", TransactionSwiftCreateView.as_view(), name="transaction-swift-create"),
     path("batches/", TransactionBatchCreateView.as_view(), name="transaction-batch-create"),
     path(
         "batches/<int:pk>/status/",

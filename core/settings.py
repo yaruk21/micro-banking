@@ -227,6 +227,12 @@ TRANSACTION_OUTBOX_PUBLISH_BATCH_SIZE = int(
 TRANSACTION_RECOVERY_INTERVAL_SECONDS = int(
     os.getenv("TRANSACTION_RECOVERY_INTERVAL_SECONDS", "60")
 )
+SWIFT_TRANSFER_PICKUP_INTERVAL_SECONDS = int(
+    os.getenv("SWIFT_TRANSFER_PICKUP_INTERVAL_SECONDS", "60")
+)
+SWIFT_TRANSFER_PICKUP_BATCH_SIZE = int(
+    os.getenv("SWIFT_TRANSFER_PICKUP_BATCH_SIZE", "100")
+)
 TRANSACTION_PARTITION_MAINTENANCE_INTERVAL_SECONDS = int(
     os.getenv("TRANSACTION_PARTITION_MAINTENANCE_INTERVAL_SECONDS", "86400")
 )
@@ -248,6 +254,13 @@ CELERY_BEAT_SCHEDULE = {
     "recover-stuck-transfers": {
         "task": "apps.transactions.workers.celery_tasks.recover_stuck_transfers_task",
         "schedule": TRANSACTION_RECOVERY_INTERVAL_SECONDS,
+    },
+    "dispatch-due-swift-transfers": {
+        "task": "apps.transactions.workers.celery_tasks.dispatch_due_swift_transfers_task",
+        "schedule": SWIFT_TRANSFER_PICKUP_INTERVAL_SECONDS,
+        "kwargs": {
+            "limit": SWIFT_TRANSFER_PICKUP_BATCH_SIZE,
+        },
     },
     "ensure-transaction-partitions": {
         "task": "apps.transactions.workers.celery_tasks.ensure_transaction_partitions_task",

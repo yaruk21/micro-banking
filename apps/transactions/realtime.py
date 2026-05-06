@@ -46,7 +46,7 @@ def serialize_transaction_batch_status(*, batch: TransactionBatch) -> dict:
 def publish_transaction_status_update(*, transaction_id: int) -> None:
     """Publish transaction status update."""
     transaction = (
-        Transaction.objects.select_related("from_account", "to_account")
+        Transaction.objects.select_related("from_account", "to_account", "swift_details")
         .filter(id=transaction_id)
         .first()
     )

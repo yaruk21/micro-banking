@@ -11,6 +11,8 @@ def get_stuck_transaction_ids(*, threshold_seconds: int) -> list[int]:
     threshold_time = timezone.now() - timedelta(seconds=threshold_seconds)
     return list(
         Transaction.objects.filter(
+            transfer_type=Transaction.TransferType.INTERNAL,
+        ).filter(
             Q(
                 status=Transaction.Status.PENDING,
                 created_at__lte=threshold_time,

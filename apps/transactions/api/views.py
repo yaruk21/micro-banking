@@ -18,10 +18,12 @@ from core.structured_logging import log_event
 from apps.transactions.application import (
     BatchTransferItemInput,
     IdempotencyConflictError,
+    SwiftTransferInput,
     TransferInput,
     create_transaction_batch,
     TransactionPermissionError,
     TransactionValidationError,
+    create_swift_transfer,
     create_transfer,
 )
 from apps.transactions.models import Transaction, TransactionBatch
@@ -31,6 +33,7 @@ from .filters import TransactionFilter
 from .serializers import (
     TransactionBatchCreateSerializer,
     TransactionBatchReadSerializer,
+    SwiftTransactionCreateSerializer,
     TransactionCreateSerializer,
     TransactionReadSerializer,
     TransactionStatusSerializer,
@@ -193,6 +196,88 @@ class TransactionStatusView(generics.GenericAPIView):
 
         serializer = self.get_serializer(transaction)
         return Response(serializer.data)
+
+
+class TransactionSwiftCreateView(generics.GenericAPIView):
+    """Handle SWIFT transaction create API requests."""
+
+    serializer_class = SwiftTransactionCreateSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "transactions_write"
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="Idempotency-Key",
+                location=OpenApiParameter.HEADER,
+                required=True,
+                type=str,
+                description=(
+                    "Required unique key per client-side SWIFT submission. "
+                    "Reusing the same key with the same payload returns the "
+                    "existing transaction; reusing it with a different payload "
+                    "returns 409 Conflict."
+                ),
+            )
+        ],
+        responses={
+            200: TransactionReadSerializer,
+            202: TransactionReadSerializer,
+            400: OpenApiResponse(description="Missing or invalid SWIFT payload."),
+            403: OpenApiResponse(description="You can transfer only from your own account."),
+            409: OpenApiResponse(
+                description="The Idempotency-Key is already used for a different SWIFT payload."
+            ),
+        },
+        description=(
+            "Creates an asynchronous SWIFT transfer and stores beneficiary metadata. "
+            "The transfer is accepted in pending status for later delayed processing."
+        ),
+    )
+    def post(self, request, *args, **kwargs):
+        """Handle post."""
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+        if not idempotency_key:
+            raise ValidationError({"detail": "Idempotency-Key header is required."})
+
+        try:
+            transaction, created = create_swift_transfer(
+                transfer_input=SwiftTransferInput(
+                    user=request.user,
+                    from_account_iban=serializer.validated_data["from_account"].iban,
+                    amount=serializer.validated_data["amount"],
+                    idempotency_key=idempotency_key,
+                    swift_code=serializer.validated_data["swift_code"],
+                    beneficiary_name=serializer.validated_data["beneficiary_name"],
+                    beneficiary_account_number=serializer.validated_data[
+                        "beneficiary_account_number"
+                    ],
+                    beneficiary_iban=serializer.validated_data["beneficiary_iban"],
+                    beneficiary_bank_name=serializer.validated_data[
+                        "beneficiary_bank_name"
+                    ],
+                    beneficiary_bank_country=serializer.validated_data[
+                        "beneficiary_bank_country"
+                    ],
+                    beneficiary_address=serializer.validated_data[
+                        "beneficiary_address"
+                    ],
+                    swift_reference=serializer.validated_data["swift_reference"],
+                )
+            )
+        except TransactionPermissionError as exc:
+            raise PermissionDenied(str(exc)) from exc
+        except IdempotencyConflictError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        except TransactionValidationError as exc:
+            raise ValidationError({"detail": str(exc)}) from exc
+
+        response_serializer = TransactionReadSerializer(transaction)
+        response_status = status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK
+        return Response(response_serializer.data, status=response_status)
 
 
 class TransactionBatchCreateView(generics.GenericAPIView):

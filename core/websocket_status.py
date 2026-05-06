@@ -1,7 +1,6 @@
 import asyncio
 import json
 import re
-from typing import Optional
 
 import redis.asyncio as redis_asyncio
 from asgiref.sync import sync_to_async

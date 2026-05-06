@@ -11,7 +11,7 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import Account
 from apps.accounts.services import SYSTEM_ACCOUNT_USERNAME
 from apps.exchange.models import ExchangeRate
-from apps.transactions.models import Transaction
+from apps.transactions.models import SwiftTransferDetails, Transaction, TransactionOutbox
 from apps.transactions.selectors import list_user_transactions
 
 User = get_user_model()
@@ -462,6 +462,96 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(first_response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(second_response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(Transaction.objects.count(), 1)
+
+    def test_create_swift_transfer_returns_pending_transaction(self):
+        """Test that SWIFT create stores pending metadata without dispatching the internal worker."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000901",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+
+        response = self.client.post(
+            reverse("transaction-swift-create"),
+            {
+                "from_account_iban": from_account.iban,
+                "amount": "25.00",
+                "swift_code": "DEUTDEFF500",
+                "beneficiary_name": "Alice Example",
+                "beneficiary_account_number": "123456789",
+                "beneficiary_iban": "DE89370400440532013000",
+                "beneficiary_bank_name": "Deutsche Bank",
+                "beneficiary_bank_country": "DE",
+                "beneficiary_address": "Berlin, Germany",
+                "swift_reference": "invoice-42",
+            },
+            HTTP_IDEMPOTENCY_KEY="swift-create-1",
+            format="json",
+        )
+
+        transaction = Transaction.objects.get()
+        swift_details = SwiftTransferDetails.objects.get(transaction=transaction)
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(transaction.status, Transaction.Status.PENDING)
+        self.assertEqual(transaction.transfer_type, Transaction.TransferType.SWIFT)
+        self.assertIsNone(transaction.to_account)
+        self.assertEqual(transaction.fee_amount, Decimal("10.25"))
+        self.assertEqual(transaction.fee_currency, Account.Currency.USD)
+        self.assertEqual(TransactionOutbox.objects.count(), 0)
+        self.assertEqual(swift_details.swift_code, "DEUTDEFF500")
+        self.assertIsNotNone(swift_details.scheduled_processing_at)
+        self.assertIsNotNone(swift_details.expected_completion_at)
+        self.assertEqual(response.data["transfer_type"], Transaction.TransferType.SWIFT)
+        self.assertIsNone(response.data["to_account"])
+        self.assertIsNone(response.data["to_account_iban"])
+        self.assertEqual(
+            response.data["swift_details"]["beneficiary_bank_country"],
+            "DE",
+        )
+
+    def test_same_idempotency_key_returns_existing_swift_transaction(self):
+        """Test that SWIFT create respects idempotent replay semantics."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000902",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        payload = {
+            "from_account_iban": from_account.iban,
+            "amount": "25.00",
+            "swift_code": "DEUTDEFF500",
+            "beneficiary_name": "Alice Example",
+            "beneficiary_account_number": "123456789",
+            "beneficiary_iban": "DE89370400440532013000",
+            "beneficiary_bank_name": "Deutsche Bank",
+            "beneficiary_bank_country": "DE",
+            "beneficiary_address": "Berlin, Germany",
+            "swift_reference": "invoice-43",
+        }
+
+        first_response = self.client.post(
+            reverse("transaction-swift-create"),
+            payload,
+            HTTP_IDEMPOTENCY_KEY="swift-replay-1",
+            format="json",
+        )
+        second_response = self.client.post(
+            reverse("transaction-swift-create"),
+            payload,
+            HTTP_IDEMPOTENCY_KEY="swift-replay-1",
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Transaction.objects.count(), 1)
+        self.assertEqual(SwiftTransferDetails.objects.count(), 1)
+        self.assertEqual(first_response.data["id"], second_response.data["id"])
 
 
 class TransactionSelectorReplicaRoutingTests(SimpleTestCase):

@@ -1,10 +1,18 @@
 import logging
-from decimal import Decimal
+from datetime import timedelta
+from decimal import Decimal, ROUND_HALF_UP
+
 from django.db import IntegrityError, transaction as db_transaction
+from django.utils import timezone
 
 from apps.accounts.models import Account
-from apps.transactions.models import Transaction, TransactionIdempotencyKey
+from apps.transactions.models import (
+    SwiftTransferDetails,
+    Transaction,
+    TransactionIdempotencyKey,
+)
 from apps.transactions.realtime import publish_transaction_status_update
+from core.cache_utils import bump_user_cache_version
 from core.structured_logging import log_event
 
 from .cache_versions import bump_pending_transaction_caches
@@ -14,14 +22,20 @@ from .exceptions import (
     TransactionValidationError,
 )
 from .exchange import resolve_transfer_conversion
-from .idempotency import build_transfer_fingerprint, validate_request_fingerprint
+from .idempotency import (
+    build_swift_transfer_fingerprint,
+    build_transfer_fingerprint,
+    validate_request_fingerprint,
+)
 from .outbox import (
     create_transaction_outbox,
     register_transaction_outbox_publish,
 )
-from .types import TransferInput
+from .types import SwiftTransferInput, TransferInput
 
 logger = logging.getLogger("apps.transactions")
+SWIFT_FEE_FIXED = Decimal("10.00")
+SWIFT_FEE_RATE = Decimal("0.0100")
 
 
 # Accepts a client transfer request and preserves async/idempotent semantics.
@@ -112,6 +126,7 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
                 fee_amount=fee_amount,
                 fee_currency=fee_currency,
                 status=Transaction.Status.PENDING,
+                transfer_type=Transaction.TransferType.INTERNAL,
             )
             TransactionIdempotencyKey.objects.create(
                 initiated_by=transfer_input.user,
@@ -173,6 +188,178 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
     return transfer, True
 
 
+def create_swift_transfer(
+    *,
+    transfer_input: SwiftTransferInput,
+) -> tuple[Transaction, bool]:
+    """Create or replay a SWIFT transfer without dispatching the internal worker."""
+
+    from_account = Account.objects.filter(iban=transfer_input.from_account_iban).first()
+    if from_account is None:
+        raise TransactionValidationError("Sender account must exist.")
+
+    if from_account.owner_id != transfer_input.user.id:
+        log_event(
+            logger,
+            logging.WARNING,
+            "transaction.permission_denied",
+            message="Permission denied for SWIFT transfer creation.",
+            user_id=transfer_input.user.id,
+            idempotency_key=transfer_input.idempotency_key.strip() or None,
+        )
+        raise TransactionPermissionError(
+            "You can transfer money only from your own accounts."
+        )
+
+    if not transfer_input.idempotency_key.strip():
+        raise TransactionValidationError("Idempotency-Key header is required.")
+
+    effective_idempotency_key = transfer_input.idempotency_key.strip()
+    request_fingerprint = build_swift_transfer_fingerprint(
+        from_account_iban=from_account.iban,
+        amount=transfer_input.amount,
+        swift_code=transfer_input.swift_code,
+        beneficiary_name=transfer_input.beneficiary_name,
+        beneficiary_account_number=transfer_input.beneficiary_account_number,
+        beneficiary_iban=transfer_input.beneficiary_iban,
+        beneficiary_bank_name=transfer_input.beneficiary_bank_name,
+        beneficiary_bank_country=transfer_input.beneficiary_bank_country,
+        beneficiary_address=transfer_input.beneficiary_address,
+        swift_reference=transfer_input.swift_reference,
+    )
+
+    existing_registry = TransactionIdempotencyKey.objects.filter(
+        initiated_by=transfer_input.user,
+        idempotency_key=effective_idempotency_key,
+    ).first()
+    if existing_registry is not None:
+        existing_transfer = Transaction.objects.filter(
+            id=existing_registry.transaction_id,
+        ).first()
+        if existing_transfer is None:
+            raise TransactionValidationError(
+                "Existing transaction could not be resolved for the idempotency key."
+            )
+        try:
+            validate_request_fingerprint(
+                existing_request_fingerprint=existing_registry.request_fingerprint,
+                request_fingerprint=request_fingerprint,
+            )
+        except IdempotencyConflictError:
+            _log_idempotency_conflict(
+                transfer=existing_transfer,
+                request_fingerprint=request_fingerprint,
+            )
+            raise
+        _log_replayed_transaction(existing_transfer)
+        return existing_transfer, False
+
+    created_at = timezone.now()
+    scheduled_processing_at = _add_business_days(created_at, 1)
+    expected_completion_at = _add_business_days(
+        created_at,
+        _get_swift_completion_business_days(
+            request_fingerprint=request_fingerprint,
+        ),
+    )
+    if expected_completion_at < scheduled_processing_at:
+        expected_completion_at = scheduled_processing_at
+    swift_fee_amount = (
+        SWIFT_FEE_FIXED + (transfer_input.amount * SWIFT_FEE_RATE)
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    try:
+        with db_transaction.atomic():
+            transfer = Transaction.objects.create(
+                initiated_by=transfer_input.user,
+                from_account=from_account,
+                to_account=None,
+                idempotency_key=effective_idempotency_key,
+                request_fingerprint=request_fingerprint,
+                amount=transfer_input.amount,
+                credited_amount=transfer_input.amount,
+                exchange_rate=Decimal("1.00000000"),
+                exchange_rate_provider="swift",
+                fee_amount=swift_fee_amount,
+                fee_currency=from_account.currency,
+                status=Transaction.Status.PENDING,
+                transfer_type=Transaction.TransferType.SWIFT,
+            )
+            SwiftTransferDetails.objects.create(
+                transaction=transfer,
+                swift_code=transfer_input.swift_code,
+                beneficiary_name=transfer_input.beneficiary_name,
+                beneficiary_account_number=transfer_input.beneficiary_account_number,
+                beneficiary_iban=transfer_input.beneficiary_iban,
+                beneficiary_bank_name=transfer_input.beneficiary_bank_name,
+                beneficiary_bank_country=transfer_input.beneficiary_bank_country,
+                beneficiary_address=transfer_input.beneficiary_address,
+                swift_reference=transfer_input.swift_reference,
+                scheduled_processing_at=scheduled_processing_at,
+                expected_completion_at=expected_completion_at,
+                swift_fee_fixed=SWIFT_FEE_FIXED,
+                swift_fee_rate=SWIFT_FEE_RATE,
+            )
+            TransactionIdempotencyKey.objects.create(
+                initiated_by=transfer_input.user,
+                idempotency_key=effective_idempotency_key,
+                request_fingerprint=request_fingerprint,
+                transaction_id=transfer.id,
+            )
+    except IntegrityError:
+        existing_registry = TransactionIdempotencyKey.objects.filter(
+            initiated_by=transfer_input.user,
+            idempotency_key=effective_idempotency_key,
+        ).first()
+        if existing_registry is None:
+            raise
+
+        existing_transfer = Transaction.objects.filter(
+            id=existing_registry.transaction_id,
+        ).first()
+        if existing_transfer is None:
+            raise TransactionValidationError(
+                "Existing transaction could not be resolved for the idempotency key."
+            )
+
+        try:
+            validate_request_fingerprint(
+                existing_request_fingerprint=existing_registry.request_fingerprint,
+                request_fingerprint=request_fingerprint,
+            )
+        except IdempotencyConflictError:
+            _log_idempotency_conflict(
+                transfer=existing_transfer,
+                request_fingerprint=request_fingerprint,
+            )
+            raise
+        _log_replayed_transaction(existing_transfer)
+        return existing_transfer, False
+
+    log_event(
+        logger,
+        logging.INFO,
+        "transaction.swift_accepted",
+        message="SWIFT transaction accepted for deferred processing.",
+        transaction_id=transfer.id,
+        user_id=transfer.initiated_by_id,
+        from_account_id=transfer.from_account_id,
+        amount=transfer.amount,
+        status=transfer.status,
+        transfer_type=transfer.transfer_type,
+        idempotency_key=transfer.idempotency_key,
+        request_fingerprint=transfer.request_fingerprint,
+        scheduled_processing_at=scheduled_processing_at,
+        expected_completion_at=expected_completion_at,
+    )
+    bump_user_cache_version(
+        namespace="transactions_list",
+        user_id=from_account.owner_id,
+    )
+    publish_transaction_status_update(transaction_id=transfer.id)
+    return transfer, True
+
+
 # Emits a structured log when the same idempotency key is reused with a new payload.
 def _log_idempotency_conflict(
     *,
@@ -215,3 +402,26 @@ def _log_replayed_transaction(transfer: Transaction) -> None:
         idempotency_key=transfer.idempotency_key,
         request_fingerprint=transfer.request_fingerprint,
     )
+
+
+def _add_business_days(start, business_days: int):
+    """Return a datetime shifted by the requested number of business days."""
+
+    current = start
+    added = 0
+    while added < business_days:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            added += 1
+    return current
+
+
+def _get_swift_completion_business_days(*, request_fingerprint: str) -> int:
+    """Return a deterministic 1-3 business day completion window for SWIFT."""
+
+    try:
+        fingerprint_sample = int(request_fingerprint[:2], 16)
+    except ValueError:
+        return 3
+
+    return 1 + (fingerprint_sample % 3)

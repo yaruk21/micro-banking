@@ -17,6 +17,24 @@ class TransferInput:
 
 
 @dataclass(frozen=True)
+class SwiftTransferInput:
+    """Represent SWIFT transfer input."""
+
+    user: User
+    from_account_iban: str
+    amount: Decimal
+    idempotency_key: str
+    swift_code: str
+    beneficiary_name: str
+    beneficiary_account_number: str
+    beneficiary_iban: str
+    beneficiary_bank_name: str
+    beneficiary_bank_country: str
+    beneficiary_address: str
+    swift_reference: str
+
+
+@dataclass(frozen=True)
 class BatchTransferItemInput:
     """Represent batch transfer item input."""
     from_account_iban: str
