@@ -10,6 +10,7 @@ def get_exchange_rate(
     quote_currency: str,
     provider: str = "privatbank",
 ) -> Decimal:
+    """Return exchange rate."""
     if base_currency == quote_currency:
         return Decimal("1")
 

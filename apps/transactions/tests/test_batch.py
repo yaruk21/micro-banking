@@ -13,7 +13,9 @@ User = get_user_model()
 
 
 class TransactionBatchApiTests(APITestCase):
+    """Test transaction batch api test behavior."""
     def setUp(self):
+        """Handle set up."""
         self.user = User.objects.create_user(
             username="batch-alice",
             password="testpass123",
@@ -25,6 +27,7 @@ class TransactionBatchApiTests(APITestCase):
         self.client.force_authenticate(user=self.user)
 
     def _build_payload(self, from_account, to_account):
+        """Handle build payload."""
         return {
             "items": [
                 {
@@ -44,6 +47,7 @@ class TransactionBatchApiTests(APITestCase):
 
     @patch("apps.transactions.workers.celery_tasks.process_transaction_batch_task.delay")
     def test_create_batch_returns_accepted_and_dispatches_worker(self, mock_delay):
+        """Test that create batch returns accepted and dispatches worker."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBB00000000000000000000000000111",
@@ -73,6 +77,7 @@ class TransactionBatchApiTests(APITestCase):
 
     @patch("apps.transactions.workers.celery_tasks.process_transaction_batch_task.delay")
     def test_same_batch_idempotency_key_returns_existing_batch(self, mock_delay):
+        """Test that same batch idempotency key returns existing batch."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBB00000000000000000000000000121",
@@ -113,6 +118,7 @@ class TransactionBatchApiTests(APITestCase):
         self,
         mock_delay,
     ):
+        """Test that same batch idempotency key with different payload returns conflict."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBB00000000000000000000000000131",
@@ -157,6 +163,7 @@ class TransactionBatchApiTests(APITestCase):
         mock_delay.assert_called_once()
 
     def test_batch_status_endpoint(self):
+        """Test that batch status endpoint."""
         batch = TransactionBatch.objects.create(
             initiated_by=self.user,
             idempotency_key="batch-status-1",
@@ -174,6 +181,7 @@ class TransactionBatchApiTests(APITestCase):
         self.assertEqual(response.data["status"], TransactionBatch.Status.PENDING)
 
     def test_batch_rejects_more_than_1000_items(self):
+        """Test that batch rejects more than 1000 items."""
         payload = {
             "items": [
                 {

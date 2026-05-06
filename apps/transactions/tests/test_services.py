@@ -18,14 +18,20 @@ from apps.transactions.application import (
     get_stuck_transaction_ids,
     process_transfer,
 )
-from apps.transactions.models import Transaction
+from apps.transactions.models import Transaction, TransactionIdempotencyKey
 from apps.transactions.workers.celery_tasks import recover_stuck_transfers_task
 
 User = get_user_model()
 
 
+# Covers service-layer transfer behavior, including the standalone idempotency registry.
 class TransferServiceTests(TestCase):
+    """Validate transfer creation, processing, recovery, and idempotency behavior."""
+
+    # Creates isolated users and resets caches before each service-layer test.
     def setUp(self):
+        """Prepare a clean cache and baseline users for each test."""
+
         cache.clear()
         self.user = User.objects.create_user(username="service-alice", password="pass123")
         self.other_user = User.objects.create_user(
@@ -33,7 +39,10 @@ class TransferServiceTests(TestCase):
             password="pass123",
         )
 
+    # Verifies the happy-path same-currency transfer flow and registry persistence.
     def test_create_transfer_success(self):
+        """A successful transfer should complete and persist one registry mapping."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBS00000000000000000000000000011",
@@ -71,8 +80,18 @@ class TransferServiceTests(TestCase):
         self.assertEqual(transfer.fee_amount, Decimal("0.00"))
         self.assertEqual(transfer.fee_currency, Account.Currency.USD)
         self.assertEqual(transfer.exchange_rate_provider, "internal")
+        self.assertTrue(
+            TransactionIdempotencyKey.objects.filter(
+                initiated_by=self.user,
+                idempotency_key="service-success-1",
+                transaction_id=transfer.id,
+            ).exists()
+        )
 
+    # Verifies that insufficient balance leads to a failed processed transaction.
     def test_create_transfer_fails_with_insufficient_balance(self):
+        """Transfers without enough funds should fail without moving balances."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBS00000000000000000000000000021",
@@ -106,7 +125,10 @@ class TransferServiceTests(TestCase):
         self.assertEqual(Transaction.objects.count(), 1)
         self.assertEqual(transfer.status, Transaction.Status.FAILED)
 
+    # Verifies FX conversion, fee collection, and recipient crediting.
     def test_create_transfer_converts_amount_when_currency_differs(self):
+        """Cross-currency transfers should apply exchange rates and fee routing."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBS00000000000000000000000000031",
@@ -163,7 +185,10 @@ class TransferServiceTests(TestCase):
         self.assertEqual(fee_account.balance, Decimal("0.12"))
         self.assertEqual(fee_account.owner.username, SYSTEM_ACCOUNT_USERNAME)
 
+    # Verifies validation failure when no FX rate is available.
     def test_create_transfer_fails_when_exchange_rate_is_missing(self):
+        """Cross-currency transfers should be rejected when the FX rate is missing."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBS00000000000000000000000000033",
@@ -191,7 +216,10 @@ class TransferServiceTests(TestCase):
                 )
             )
 
+    # Verifies ownership enforcement on the sender account.
     def test_create_transfer_fails_for_foreign_sender_account(self):
+        """Users must not be able to create transfers from someone else's account."""
+
         from_account = Account.objects.create(
             owner=self.other_user,
             iban="MBS00000000000000000000000000041",
@@ -218,7 +246,10 @@ class TransferServiceTests(TestCase):
 
         self.assertEqual(Transaction.objects.count(), 0)
 
+    # Verifies that self-transfers are accepted asynchronously but fail on processing.
     def test_create_transfer_fails_for_same_account(self):
+        """Processing should fail when sender and receiver are the same account."""
+
         account = Account.objects.create(
             owner=self.user,
             iban="MBS00000000000000000000000000051",
@@ -245,7 +276,10 @@ class TransferServiceTests(TestCase):
         self.assertEqual(transfer.status, Transaction.Status.FAILED)
         self.assertIn("must be different", transfer.failure_reason)
 
+    # Verifies that the same key/payload pair reuses one transaction and one registry row.
     def test_create_transfer_reuses_existing_transaction_for_same_idempotency_key(self):
+        """Repeated identical requests should resolve to the same transaction record."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBS00000000000000000000000000061",
@@ -282,8 +316,12 @@ class TransferServiceTests(TestCase):
         self.assertFalse(second_created)
         self.assertEqual(first_transfer.id, second_transfer.id)
         self.assertEqual(Transaction.objects.count(), 1)
+        self.assertEqual(TransactionIdempotencyKey.objects.count(), 1)
 
+    # Verifies stale recovery lookup only returns records older than the threshold.
     def test_get_stuck_transaction_ids_returns_only_stale_transactions(self):
+        """Recovery lookup should include only stale pending or processing transactions."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBS00000000000000000000000000071",
@@ -327,10 +365,13 @@ class TransferServiceTests(TestCase):
         self.assertNotIn(fresh_transaction.id, stuck_ids)
 
     @patch("apps.transactions.workers.celery_tasks.process_transfer_task.delay")
+    # Verifies that the Celery recovery task requeues stale transaction ids.
     def test_recover_stuck_transfers_task_requeues_stale_transactions(
         self,
         mock_delay,
     ):
+        """Recovery task should re-dispatch stale transactions to Celery."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBS00000000000000000000000000081",

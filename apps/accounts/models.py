@@ -5,7 +5,9 @@ from django.db import models
 
 
 class Account(models.Model):
+    """Represent account."""
     class Currency(models.TextChoices):
+        """Represent currency."""
         USD = "USD", "USD"
         EUR = "EUR", "EUR"
         UAH = "UAH", "UAH"
@@ -18,6 +20,7 @@ class Account(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
+        """Represent meta."""
         ordering = ("id",)
         constraints = [
             models.CheckConstraint(
@@ -32,11 +35,13 @@ class Account(models.Model):
         ]
 
     def __str__(self) -> str:
+        """Handle str."""
         system_label = " system" if self.is_system else ""
         return f"{self.iban} ({self.currency}{system_label})"
 
     @property
     def cached_balance(self) -> Decimal:
+        """Handle cached balance."""
         from .cache import get_cached_account_balance
 
         return get_cached_account_balance(account=self)

@@ -16,7 +16,9 @@ User = get_user_model()
 
 
 class AccountApiTests(APITestCase):
+    """Test account api test behavior."""
     def setUp(self):
+        """Handle set up."""
         cache.clear()
         self.user = User.objects.create_user(username="alice", password="testpass123")
         other_user = User.objects.create_user(username="bob", password="testpass123")
@@ -37,6 +39,7 @@ class AccountApiTests(APITestCase):
         )
 
     def test_create_account(self):
+        """Test that create account."""
         response = self.client.post(
             reverse("account-list-create"),
             {"currency": Account.Currency.USD},
@@ -48,6 +51,7 @@ class AccountApiTests(APITestCase):
         self.assertEqual(response.data["balance"], "1000.00")
 
     def test_list_only_user_accounts(self):
+        """Test that list only user accounts."""
         own_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000001",
@@ -61,6 +65,7 @@ class AccountApiTests(APITestCase):
         self.assertEqual(response.data[0]["id"], own_account.id)
 
     def test_register_returns_tokens(self):
+        """Test that register returns tokens."""
         response = self.client.post(
             reverse("register"),
             {
@@ -79,6 +84,7 @@ class AccountApiTests(APITestCase):
         self.assertTrue(User.objects.filter(username="charlie").exists())
 
     def test_register_rejects_duplicate_username(self):
+        """Test that register rejects duplicate username."""
         response = self.client.post(
             reverse("register"),
             {
@@ -94,6 +100,7 @@ class AccountApiTests(APITestCase):
         self.assertIn("username", response.data)
 
     def test_account_balance_is_served_from_cache_until_invalidated(self):
+        """Test that account balance is served from cache until invalidated."""
         own_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000002",
@@ -111,6 +118,7 @@ class AccountApiTests(APITestCase):
         self.assertEqual(cached_payload["balance"], "100.00")
 
     def test_completed_transfer_refreshes_cached_balances(self):
+        """Test that completed transfer refreshes cached balances."""
         sender_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000003",

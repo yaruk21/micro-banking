@@ -8,6 +8,7 @@ User = get_user_model()
 
 @dataclass(frozen=True)
 class TransferInput:
+    """Represent transfer input."""
     user: User
     from_account_iban: str
     to_account_iban: str
@@ -17,6 +18,7 @@ class TransferInput:
 
 @dataclass(frozen=True)
 class BatchTransferItemInput:
+    """Represent batch transfer item input."""
     from_account_iban: str
     to_account_iban: str
     amount: Decimal

@@ -22,6 +22,7 @@ logger = logging.getLogger("apps.transactions")
 
 
 def process_transfer(*, transaction_id: int) -> Transaction:
+    """Process transfer."""
     with db_transaction.atomic():
         transfer = (
             Transaction.objects.select_for_update()
@@ -163,6 +164,7 @@ def process_transfer(*, transaction_id: int) -> Transaction:
 
 
 def _fail_transfer(*, transfer: Transaction, reason: str) -> Transaction:
+    """Handle fail transfer."""
     transfer.status = Transaction.Status.FAILED
     transfer.completed_at = timezone.now()
     transfer.failure_reason = reason

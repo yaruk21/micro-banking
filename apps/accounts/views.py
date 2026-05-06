@@ -17,9 +17,11 @@ from .services import build_auth_payload, create_account_for_user, register_user
 
 
 class AccountListCreateView(generics.ListCreateAPIView):
+    """Handle account list create API requests."""
     throttle_classes = [ScopedRateThrottle]
 
     def get_queryset(self):
+        """Return queryset."""
         if getattr(self, "swagger_fake_view", False):
             return Account.objects.none()
         if not self.request.user.is_authenticated:
@@ -27,17 +29,20 @@ class AccountListCreateView(generics.ListCreateAPIView):
         return list_user_accounts(user=self.request.user)
 
     def get_serializer_class(self):
+        """Return serializer class."""
         if self.request.method == "POST":
             return AccountCreateSerializer
         return AccountReadSerializer
 
     def get_throttles(self):
+        """Return throttles."""
         self.throttle_scope = (
             "accounts_write" if self.request.method == "POST" else "accounts_read"
         )
         return super().get_throttles()
 
     def list(self, request, *args, **kwargs):
+        """Handle list."""
         version = get_user_cache_version(
             namespace="accounts_list",
             user_id=request.user.id,
@@ -61,6 +66,7 @@ class AccountListCreateView(generics.ListCreateAPIView):
         return response
 
     def create(self, request, *args, **kwargs):
+        """Handle create."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -73,12 +79,14 @@ class AccountListCreateView(generics.ListCreateAPIView):
 
 
 class RegisterView(generics.GenericAPIView):
+    """Handle register API requests."""
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "register"
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
 
     def post(self, request, *args, **kwargs):
+        """Handle post."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 

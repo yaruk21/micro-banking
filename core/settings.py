@@ -10,6 +10,7 @@ load_dotenv(BASE_DIR / ".env")
 
 
 def env_to_bool(name: str, default: bool = False) -> bool:
+    """Handle env to bool."""
     value = os.getenv(name)
     if value is None:
         return default
@@ -191,6 +192,12 @@ TRANSACTION_OUTBOX_PUBLISH_BATCH_SIZE = int(
 TRANSACTION_RECOVERY_INTERVAL_SECONDS = int(
     os.getenv("TRANSACTION_RECOVERY_INTERVAL_SECONDS", "60")
 )
+TRANSACTION_PARTITION_MAINTENANCE_INTERVAL_SECONDS = int(
+    os.getenv("TRANSACTION_PARTITION_MAINTENANCE_INTERVAL_SECONDS", "86400")
+)
+TRANSACTION_PARTITION_MONTHS_AHEAD = int(
+    os.getenv("TRANSACTION_PARTITION_MONTHS_AHEAD", "3")
+)
 EXCHANGE_RATE_SYNC_INTERVAL_SECONDS = int(
     os.getenv("EXCHANGE_RATE_SYNC_INTERVAL_SECONDS", "900")
 )
@@ -206,6 +213,10 @@ CELERY_BEAT_SCHEDULE = {
     "recover-stuck-transfers": {
         "task": "apps.transactions.workers.celery_tasks.recover_stuck_transfers_task",
         "schedule": TRANSACTION_RECOVERY_INTERVAL_SECONDS,
+    },
+    "ensure-transaction-partitions": {
+        "task": "apps.transactions.workers.celery_tasks.ensure_transaction_partitions_task",
+        "schedule": TRANSACTION_PARTITION_MAINTENANCE_INTERVAL_SECONDS,
     },
     "sync-privatbank-exchange-rates": {
         "task": "apps.exchange.tasks.sync_privatbank_exchange_rates_task",

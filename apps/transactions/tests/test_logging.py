@@ -20,7 +20,9 @@ User = get_user_model()
 
 
 class StructuredLoggingTests(SimpleTestCase):
+    """Test structured logging test behavior."""
     def test_json_formatter_includes_structured_fields(self):
+        """Test that json formatter includes structured fields."""
         logger = logging.getLogger("apps.transactions.structured-tests")
         stream = StringIO()
         handler = logging.StreamHandler(stream)
@@ -56,7 +58,9 @@ class StructuredLoggingTests(SimpleTestCase):
 
 
 class RequestIdMiddlewareTests(APITestCase):
+    """Test request id middleware test behavior."""
     def setUp(self):
+        """Handle set up."""
         self.user = User.objects.create_user(
             username="logging-alice",
             password="testpass123",
@@ -72,6 +76,7 @@ class RequestIdMiddlewareTests(APITestCase):
         self,
         mock_delay,
     ):
+        """Test that transaction create returns request id and propagates it to worker."""
         mock_delay.return_value = SimpleNamespace(id="celery-task-123")
         from_account = Account.objects.create(
             owner=self.user,

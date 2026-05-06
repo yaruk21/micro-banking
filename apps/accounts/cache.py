@@ -15,6 +15,7 @@ ACCOUNT_BALANCE_CACHE_NAMESPACE = "account_balance"
 
 
 def get_cached_account_balance(*, account: Account) -> Decimal:
+    """Return cached account balance."""
     version = get_account_cache_version(
         namespace=ACCOUNT_BALANCE_CACHE_NAMESPACE,
         account_id=account.id,
@@ -38,6 +39,7 @@ def get_cached_account_balance(*, account: Account) -> Decimal:
 
 
 def refresh_account_balance_cache(*, account: Account) -> Decimal:
+    """Refresh account balance cache."""
     version = bump_account_cache_version(
         namespace=ACCOUNT_BALANCE_CACHE_NAMESPACE,
         account_id=account.id,

@@ -8,11 +8,14 @@ from apps.exchange.privatbank import get_privatbank_rates
 
 
 class PrivatBankProviderTests(SimpleTestCase):
+    """Test privat bank provider tests behavior."""
+
     @patch("apps.exchange.privatbank.requests.get")
     def test_get_privatbank_rates_returns_normalized_supported_rates(
         self,
         mock_get,
     ):
+        """Test that get privatbank rates returns normalized supported rates."""
         mock_response = MagicMock()
         mock_response.json.return_value = [
             {
@@ -66,6 +69,7 @@ class PrivatBankProviderTests(SimpleTestCase):
         self,
         mock_get,
     ):
+        """Test that get privatbank rates ignores invalid or incomplete rows."""
         mock_response = MagicMock()
         mock_response.json.return_value = [
             {
@@ -123,6 +127,7 @@ class PrivatBankProviderTests(SimpleTestCase):
 
     @patch("apps.exchange.privatbank.requests.get")
     def test_get_privatbank_rates_propagates_http_errors(self, mock_get):
+        """Test that get privatbank rates propagates http errors."""
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.HTTPError("boom")
         mock_get.return_value = mock_response

@@ -15,10 +15,13 @@ from apps.exchange.services import (
 
 
 class ExchangeRateServiceTests(TestCase):
+    """Test exchange rate service test behavior."""
     def setUp(self):
+        """Handle set up."""
         cache.clear()
 
     def test_upsert_exchange_rate_creates_new_rate(self):
+        """Test that upsert exchange rate creates new rate."""
         fetched_at = timezone.now()
 
         exchange_rate = upsert_exchange_rate(
@@ -37,6 +40,7 @@ class ExchangeRateServiceTests(TestCase):
         self.assertEqual(exchange_rate.fetched_at, fetched_at)
 
     def test_upsert_exchange_rate_updates_existing_rate(self):
+        """Test that upsert exchange rate updates existing rate."""
         original_fetched_at = timezone.now()
         updated_fetched_at = original_fetched_at + timezone.timedelta(minutes=15)
         ExchangeRate.objects.create(
@@ -60,6 +64,7 @@ class ExchangeRateServiceTests(TestCase):
         self.assertEqual(exchange_rate.fetched_at, updated_fetched_at)
 
     def test_upsert_exchange_rate_invalidates_existing_cache(self):
+        """Test that upsert exchange rate invalidates existing cache."""
         fetched_at = timezone.now()
         set_cached_exchange_rate(
             provider="privatbank",
@@ -84,6 +89,7 @@ class ExchangeRateServiceTests(TestCase):
         )
 
     def test_sync_privatbank_exchange_rates_creates_rates(self):
+        """Test that sync privatbank exchange rates creates rates."""
         fetched_at = datetime(2026, 5, 5, 12, 0, tzinfo=dt_timezone.utc)
 
         with patch("apps.exchange.services.timezone.now", return_value=fetched_at):
@@ -121,6 +127,7 @@ class ExchangeRateServiceTests(TestCase):
         )
 
     def test_sync_privatbank_exchange_rates_updates_existing_rates(self):
+        """Test that sync privatbank exchange rates updates existing rates."""
         original_fetched_at = datetime(2026, 5, 5, 10, 0, tzinfo=dt_timezone.utc)
         updated_fetched_at = datetime(2026, 5, 5, 13, 0, tzinfo=dt_timezone.utc)
         ExchangeRate.objects.create(

@@ -16,6 +16,12 @@ The codebase is split into:
 - `apps/transactions`: transaction submission, idempotency, async processing, and status tracking
 - `core`: framework settings, cache helpers, URL routing, and Celery bootstrap
 
+PostgreSQL-specific storage notes:
+
+- `transactions_transaction` is range-partitioned by `created_at` into monthly partitions plus a `DEFAULT` partition.
+- Celery Beat runs scheduled partition maintenance to pre-create future monthly transaction partitions.
+- Global transaction idempotency is enforced via a separate `TransactionIdempotencyKey` registry table so monthly partitions do not need a cross-partition unique constraint.
+
 ## Transaction Flow
 
 `POST /api/transactions/` is asynchronous and requires `Idempotency-Key`.
@@ -56,7 +62,7 @@ Flow:
 
 - Idempotent transaction creation is enforced by:
   - application-level fingerprint checks
-  - database unique constraint on `(initiated_by, idempotency_key)`
+  - database unique constraint on the `TransactionIdempotencyKey` registry table
 - Balance mutation is wrapped in a database transaction with deterministic lock ordering.
 - Transaction acceptance and broker publication are decoupled with a PostgreSQL outbox row per accepted transaction.
 - Celery delivery is hardened with:
@@ -94,7 +100,7 @@ These are the main remaining gaps before the system can be called banking-grade:
 1. `Account.balance` is still mutable state rather than a projection from immutable ledger entries.
 2. PostgreSQL concurrency semantics are relied on in production, but the current default test lane uses SQLite.
 3. Observability is still basic text logging rather than structured transaction event logs and traces.
-4. Read scaling still relies on a single primary database with no replica routing or partitioning.
+4. Read scaling still relies on a single primary database with no replica routing.
 
 ## Next Architecture Steps
 

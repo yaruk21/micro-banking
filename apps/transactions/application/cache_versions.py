@@ -8,6 +8,7 @@ def bump_pending_transaction_caches(
     from_account: Account,
     to_account: Account,
 ) -> None:
+    """Bump pending transaction caches."""
     affected_user_ids = {from_account.owner_id, to_account.owner_id}
     for user_id in affected_user_ids:
         bump_user_cache_version(namespace="transactions_list", user_id=user_id)
@@ -18,6 +19,7 @@ def bump_transfer_related_caches(
     from_account: Account,
     to_account: Account,
 ) -> None:
+    """Bump transfer related caches."""
     affected_accounts = {from_account.id: from_account, to_account.id: to_account}
     for account in affected_accounts.values():
         refresh_account_balance_cache(account=account)
@@ -33,6 +35,7 @@ def bump_failed_transaction_caches(
     from_account: Account,
     to_account: Account,
 ) -> None:
+    """Bump failed transaction caches."""
     affected_user_ids = {from_account.owner_id, to_account.owner_id}
     for user_id in affected_user_ids:
         bump_user_cache_version(namespace="transactions_list", user_id=user_id)

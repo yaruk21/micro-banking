@@ -20,6 +20,7 @@ def resolve_transfer_conversion(
     to_account: Account,
     amount: Decimal,
 ) -> tuple[Decimal, Decimal, Decimal, str, str]:
+    """Handle resolve transfer conversion."""
     if from_account.currency == to_account.currency:
         return (
             Decimal("1.00000000"),

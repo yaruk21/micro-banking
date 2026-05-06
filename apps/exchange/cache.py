@@ -18,6 +18,7 @@ def get_cached_exchange_rate(
     base_currency: str,
     quote_currency: str,
 ):
+    """Return cached exchange rate."""
     version = get_exchange_rate_cache_version(
         namespace=EXCHANGE_RATE_CACHE_NAMESPACE,
         provider=provider,
@@ -41,6 +42,7 @@ def set_cached_exchange_rate(
     quote_currency: str,
     rate: Decimal,
 ) -> Decimal:
+    """Set cached exchange rate."""
     version = get_exchange_rate_cache_version(
         namespace=EXCHANGE_RATE_CACHE_NAMESPACE,
         provider=provider,
@@ -68,6 +70,7 @@ def invalidate_exchange_rate_cache(
     base_currency: str,
     quote_currency: str,
 ) -> int:
+    """Invalidate exchange rate cache."""
     return bump_exchange_rate_cache_version(
         namespace=EXCHANGE_RATE_CACHE_NAMESPACE,
         provider=provider,

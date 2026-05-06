@@ -12,6 +12,7 @@ logger = logging.getLogger("apps.exchange")
 
 @shared_task(bind=True)
 def sync_privatbank_exchange_rates_task(self) -> int:
+    """Synchronize privatbank exchange rates task."""
     task_token = set_task_id(self.request.id)
     try:
         log_event(

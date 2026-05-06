@@ -11,6 +11,7 @@ from apps.transactions.models import (
 
 
 class TransactionCreateSerializer(serializers.Serializer):
+    """Serialize and validate transaction create data."""
     from_account_iban = serializers.SlugRelatedField(
         queryset=Account.objects.all(),
         slug_field="iban",
@@ -24,12 +25,14 @@ class TransactionCreateSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=18, decimal_places=2)
 
     def validate_amount(self, value: Decimal) -> Decimal:
+        """Validate amount."""
         if value <= Decimal("0.00"):
             raise serializers.ValidationError("Amount must be greater than zero.")
         return value
 
 
 class TransactionReadSerializer(serializers.ModelSerializer):
+    """Serialize and validate transaction read data."""
     from_account_iban = serializers.CharField(source="from_account.iban", read_only=True)
     from_account_currency = serializers.CharField(
         source="from_account.currency",
@@ -42,6 +45,7 @@ class TransactionReadSerializer(serializers.ModelSerializer):
     )
 
     class Meta:
+        """Represent meta."""
         model = Transaction
         fields = (
             "id",
@@ -66,7 +70,9 @@ class TransactionReadSerializer(serializers.ModelSerializer):
 
 
 class TransactionStatusSerializer(serializers.ModelSerializer):
+    """Serialize and validate transaction status data."""
     class Meta:
+        """Represent meta."""
         model = Transaction
         fields = (
             "id",
@@ -79,21 +85,25 @@ class TransactionStatusSerializer(serializers.ModelSerializer):
 
 
 class TransactionBatchItemCreateSerializer(serializers.Serializer):
+    """Serialize and validate transaction batch item create data."""
     from_account_iban = serializers.CharField(max_length=34)
     to_account_iban = serializers.CharField(max_length=34)
     amount = serializers.DecimalField(max_digits=18, decimal_places=2)
     idempotency_key = serializers.CharField(max_length=255)
 
     def validate_amount(self, value: Decimal) -> Decimal:
+        """Validate amount."""
         if value <= Decimal("0.00"):
             raise serializers.ValidationError("Amount must be greater than zero.")
         return value
 
 
 class TransactionBatchCreateSerializer(serializers.Serializer):
+    """Serialize and validate transaction batch create data."""
     items = TransactionBatchItemCreateSerializer(many=True)
 
     def validate_items(self, value):
+        """Validate items."""
         if not value:
             raise serializers.ValidationError(
                 "Batch must contain at least one transaction."
@@ -112,6 +122,7 @@ class TransactionBatchCreateSerializer(serializers.Serializer):
 
 
 class TransactionBatchItemReadSerializer(serializers.ModelSerializer):
+    """Serialize and validate transaction batch item read data."""
     transaction_id = serializers.IntegerField(source="transaction.id", read_only=True)
     transaction_status = serializers.CharField(
         source="transaction.status",
@@ -119,6 +130,7 @@ class TransactionBatchItemReadSerializer(serializers.ModelSerializer):
     )
 
     class Meta:
+        """Represent meta."""
         model = TransactionBatchItem
         fields = (
             "id",
@@ -135,9 +147,11 @@ class TransactionBatchItemReadSerializer(serializers.ModelSerializer):
 
 
 class TransactionBatchReadSerializer(serializers.ModelSerializer):
+    """Serialize and validate transaction batch read data."""
     items = TransactionBatchItemReadSerializer(many=True, read_only=True)
 
     class Meta:
+        """Represent meta."""
         model = TransactionBatch
         fields = (
             "id",

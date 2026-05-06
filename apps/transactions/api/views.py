@@ -40,11 +40,13 @@ logger = logging.getLogger("apps.transactions")
 
 
 class TransactionListCreateView(generics.ListCreateAPIView):
+    """Handle transaction list create API requests."""
     filterset_class = TransactionFilter
     ordering_fields = ("created_at", "amount")
     throttle_classes = [ScopedRateThrottle]
 
     def get_queryset(self):
+        """Return queryset."""
         if getattr(self, "swagger_fake_view", False):
             return Transaction.objects.none()
         if not self.request.user.is_authenticated:
@@ -52,11 +54,13 @@ class TransactionListCreateView(generics.ListCreateAPIView):
         return list_user_transactions(user=self.request.user)
 
     def get_serializer_class(self):
+        """Return serializer class."""
         if self.request.method == "POST":
             return TransactionCreateSerializer
         return TransactionReadSerializer
 
     def get_throttles(self):
+        """Return throttles."""
         self.throttle_scope = (
             "transactions_write"
             if self.request.method == "POST"
@@ -65,6 +69,7 @@ class TransactionListCreateView(generics.ListCreateAPIView):
         return super().get_throttles()
 
     def list(self, request, *args, **kwargs):
+        """Handle list."""
         version = get_user_cache_version(
             namespace="transactions_list",
             user_id=request.user.id,
@@ -118,9 +123,11 @@ class TransactionListCreateView(generics.ListCreateAPIView):
         ),
     )
     def post(self, request, *args, **kwargs):
+        """Handle post."""
         return self.create(request, *args, **kwargs)
 
     def create(self, request, *args, **kwargs):
+        """Handle create."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         idempotency_key = request.headers.get("Idempotency-Key", "").strip()
@@ -164,6 +171,7 @@ class TransactionListCreateView(generics.ListCreateAPIView):
 
 
 class TransactionStatusView(generics.GenericAPIView):
+    """Handle transaction status API requests."""
     serializer_class = TransactionStatusSerializer
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "transactions_read"
@@ -173,6 +181,7 @@ class TransactionStatusView(generics.GenericAPIView):
         description="Returns the current asynchronous transaction status for polling clients.",
     )
     def get(self, request, *args, **kwargs):
+        """Handle get."""
         transaction = list_user_transactions(user=request.user).filter(
             id=kwargs["pk"]
         ).first()
@@ -184,6 +193,7 @@ class TransactionStatusView(generics.GenericAPIView):
 
 
 class TransactionBatchCreateView(generics.GenericAPIView):
+    """Handle transaction batch create API requests."""
     serializer_class = TransactionBatchCreateSerializer
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "transactions_write"
@@ -217,6 +227,7 @@ class TransactionBatchCreateView(generics.GenericAPIView):
         ),
     )
     def post(self, request, *args, **kwargs):
+        """Handle post."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         idempotency_key = request.headers.get("Idempotency-Key", "").strip()
@@ -247,6 +258,7 @@ class TransactionBatchCreateView(generics.GenericAPIView):
 
 
 class TransactionBatchStatusView(generics.GenericAPIView):
+    """Handle transaction batch status API requests."""
     serializer_class = TransactionBatchReadSerializer
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "transactions_read"
@@ -259,6 +271,7 @@ class TransactionBatchStatusView(generics.GenericAPIView):
         description="Returns the current asynchronous batch processing status for polling clients.",
     )
     def get(self, request, *args, **kwargs):
+        """Handle get."""
         batch = (
             TransactionBatch.objects.prefetch_related("items__transaction")
             .filter(id=kwargs["pk"], initiated_by=request.user)

@@ -4,9 +4,11 @@ from apps.transactions.application import publish_pending_transaction_outbox
 
 
 class Command(BaseCommand):
+    """Implement the management command."""
     help = "Dispatch pending transaction outbox entries to Celery."
 
     def add_arguments(self, parser):
+        """Handle add arguments."""
         parser.add_argument(
             "--limit",
             type=int,
@@ -15,6 +17,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        """Handle handle."""
         published_count = publish_pending_transaction_outbox(
             limit=options["limit"]
         )

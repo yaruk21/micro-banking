@@ -29,6 +29,7 @@ def create_transaction_batch(
     idempotency_key: str,
     items: list[BatchTransferItemInput],
 ) -> tuple[TransactionBatch, bool]:
+    """Create transaction batch."""
     if not idempotency_key.strip():
         raise TransactionValidationError("Idempotency-Key header is required.")
 
@@ -105,6 +106,7 @@ def create_transaction_batch(
 
 
 def process_transaction_batch(*, batch_id: int) -> TransactionBatch:
+    """Process transaction batch."""
     batch = TransactionBatch.objects.filter(id=batch_id).first()
     if batch is None:
         raise TransactionValidationError("Transaction batch does not exist.")
@@ -169,6 +171,7 @@ def process_transaction_batch(*, batch_id: int) -> TransactionBatch:
 
 
 def _finalize_transaction_batch(*, batch_id: int) -> None:
+    """Handle finalize transaction batch."""
     batch = TransactionBatch.objects.get(id=batch_id)
     items = list(batch.items.select_related("transaction"))
     processed_items = sum(
@@ -207,6 +210,7 @@ def _finalize_transaction_batch(*, batch_id: int) -> None:
 
 
 def mark_transaction_batch_failed(*, batch_id: int, reason: str) -> None:
+    """Handle mark transaction batch failed."""
     TransactionBatch.objects.filter(id=batch_id).update(
         status=TransactionBatch.Status.FAILED,
         completed_at=timezone.now(),
@@ -229,6 +233,7 @@ def mark_transaction_batch_failed(*, batch_id: int, reason: str) -> None:
 
 
 def _update_batch_progress(*, batch_id: int, succeeded: bool) -> None:
+    """Handle update batch progress."""
     batch = TransactionBatch.objects.get(id=batch_id)
     batch.processed_items += 1
     if succeeded:
@@ -246,12 +251,14 @@ def _update_batch_progress(*, batch_id: int, succeeded: bool) -> None:
 
 
 def _dispatch_batch_after_commit(*, batch_id: int) -> None:
+    """Handle dispatch batch after commit."""
     from apps.transactions.workers.celery_tasks import process_transaction_batch_task
 
     process_transaction_batch_task.delay(batch_id)
 
 
 def _build_batch_fingerprint(*, items: list[BatchTransferItemInput]) -> str:
+    """Handle build batch fingerprint."""
     serialized_items = [
         {
             key: str(value)
@@ -268,6 +275,7 @@ def _validate_batch_request_fingerprint(
     batch: TransactionBatch,
     request_fingerprint: str,
 ) -> None:
+    """Handle validate batch request fingerprint."""
     if batch.request_fingerprint != request_fingerprint:
         raise IdempotencyConflictError(
             "This Idempotency-Key is already used for a different batch payload."
@@ -275,6 +283,7 @@ def _validate_batch_request_fingerprint(
 
 
 def _log_replayed_batch(batch: TransactionBatch) -> None:
+    """Handle log replayed batch."""
     log_event(
         logger,
         logging.INFO,

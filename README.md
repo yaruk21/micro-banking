@@ -37,6 +37,8 @@ Architecture notes:
 - race conditions are handled with `transaction.atomic()` + `select_for_update()`
 - serializers stay lightweight and do not contain transfer logic
 - PostgreSQL is the primary database for both Docker and local development
+- `transactions_transaction` is partitioned by month in PostgreSQL using `created_at`
+- Celery Beat automatically pre-creates future monthly transaction partitions
 - JWT auth is provided by `djangorestframework-simplejwt`
 - Redis is connected as the Celery broker/result backend
 - Celery worker is ready for background tasks
@@ -128,6 +130,8 @@ Idempotency-Key: transfer-001
 - Reusing the same `Idempotency-Key` with a different payload returns `409 Conflict`.
 - `Idempotency-Key` is required for `POST /api/transactions/`.
 - Internal transfer logic still uses atomic database transactions and row locking.
+- PostgreSQL keeps monthly transaction partitions plus a `DEFAULT` partition for safe write routing.
+- A scheduled transaction partition maintenance task creates future monthly partitions ahead of time.
 
 ## Transaction creation example
 

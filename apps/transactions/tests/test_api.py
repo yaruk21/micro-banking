@@ -15,13 +15,16 @@ User = get_user_model()
 
 
 class TransactionApiTests(APITestCase):
+    """Test transaction api test behavior."""
     def setUp(self):
+        """Handle set up."""
         cache.clear()
         self.user = User.objects.create_user(username="alice", password="testpass123")
         self.other_user = User.objects.create_user(username="bob", password="testpass123")
         self.client.force_authenticate(user=self.user)
 
     def test_successful_transfer(self):
+        """Test that successful transfer."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000011",
@@ -67,6 +70,7 @@ class TransactionApiTests(APITestCase):
         )
 
     def test_cross_currency_transfer_uses_exchange_rate(self):
+        """Test that cross currency transfer uses exchange rate."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000021",
@@ -125,6 +129,7 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(response.data["fee_currency"], "EUR")
 
     def test_transfer_fails_with_insufficient_balance(self):
+        """Test that transfer fails with insufficient balance."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000023",
@@ -159,6 +164,7 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(Transaction.objects.get().status, Transaction.Status.FAILED)
 
     def test_cross_currency_transfer_fails_when_exchange_rate_is_missing(self):
+        """Test that cross currency transfer fails when exchange rate is missing."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000025",
@@ -191,6 +197,7 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(Transaction.objects.count(), 0)
 
     def test_transfer_fails_for_foreign_sender_account(self):
+        """Test that transfer fails for foreign sender account."""
         from_account = Account.objects.create(
             owner=self.other_user,
             iban="MBA00000000000000000000000000031",
@@ -219,6 +226,7 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(Transaction.objects.count(), 0)
 
     def test_transfer_requires_idempotency_key_header(self):
+        """Test that transfer requires idempotency key header."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000035",
@@ -250,6 +258,7 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(Transaction.objects.count(), 0)
 
     def test_transaction_list_filter_by_account(self):
+        """Test that transaction list filter by account."""
         first_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000041",
@@ -298,6 +307,7 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(response.data[0]["id"], first_transaction.id)
 
     def test_transaction_status_endpoint(self):
+        """Test that transaction status endpoint."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000051",
@@ -330,6 +340,7 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(response.data["status"], Transaction.Status.PENDING)
 
     def test_same_idempotency_key_returns_existing_transaction(self):
+        """Test that same idempotency key returns existing transaction."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000061",
@@ -368,6 +379,7 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(first_response.data["id"], second_response.data["id"])
 
     def test_same_idempotency_key_with_different_payload_returns_conflict(self):
+        """Test that same idempotency key with different payload returns conflict."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBA00000000000000000000000000071",

@@ -15,7 +15,9 @@ User = get_user_model()
 
 
 class TransactionBatchServiceTests(TestCase):
+    """Test transaction batch service test behavior."""
     def setUp(self):
+        """Handle set up."""
         self.user = User.objects.create_user(
             username="batch-service-alice",
             password="pass123",
@@ -26,6 +28,7 @@ class TransactionBatchServiceTests(TestCase):
         )
 
     def test_process_transaction_batch_creates_transactions_and_updates_counts(self):
+        """Test that process transaction batch creates transactions and updates counts."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBD00000000000000000000000000111",
@@ -82,6 +85,7 @@ class TransactionBatchServiceTests(TestCase):
         )
 
     def test_process_transaction_batch_records_item_level_errors(self):
+        """Test that process transaction batch records item level errors."""
         batch = TransactionBatch.objects.create(
             initiated_by=self.user,
             idempotency_key="service-batch-2",

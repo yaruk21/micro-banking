@@ -12,6 +12,7 @@ logger = logging.getLogger("apps.exchange")
 
 
 def upsert_exchange_rate(*, base_currency: str, quote_currency: str, rate, provider: str, fetched_at):
+    """Upsert exchange rate."""
     exchange_rate, _ = ExchangeRate.objects.update_or_create(
         base_currency=base_currency,
         quote_currency=quote_currency,
@@ -41,6 +42,7 @@ def upsert_exchange_rate(*, base_currency: str, quote_currency: str, rate, provi
 
 
 def sync_privatbank_exchange_rates() -> int:
+    """Synchronize privatbank exchange rates."""
     fetched_at = timezone.now()
     log_event(
         logger,

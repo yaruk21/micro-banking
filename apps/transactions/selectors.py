@@ -7,6 +7,7 @@ User = get_user_model()
 
 
 def list_user_transactions(*, user: User):
+    """List user transactions."""
     return (
         Transaction.objects.select_related("from_account", "to_account")
         .filter(Q(from_account__owner=user) | Q(to_account__owner=user))

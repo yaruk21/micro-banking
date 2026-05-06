@@ -25,6 +25,7 @@ TRANSACTION_BATCH_STATUS_PATH_RE = re.compile(
 
 
 async def websocket_status_application(scope, receive, send):
+    """Handle websocket status application."""
     if scope["type"] != "websocket":
         await send({"type": "websocket.close", "code": 1003})
         return
@@ -57,6 +58,7 @@ async def websocket_status_application(scope, receive, send):
 
 
 async def _serve_transaction_status_websocket(scope, receive, send, transaction_id: int):
+    """Handle serve transaction status websocket."""
     user = await _authenticate_websocket_user(scope)
     if user is None:
         await send({"type": "websocket.close", "code": 4401})
@@ -85,6 +87,7 @@ async def _serve_transaction_status_websocket(scope, receive, send, transaction_
 
 
 async def _serve_transaction_batch_status_websocket(scope, receive, send, batch_id: int):
+    """Handle serve transaction batch status websocket."""
     user = await _authenticate_websocket_user(scope)
     if user is None:
         await send({"type": "websocket.close", "code": 4401})
@@ -113,6 +116,7 @@ async def _serve_transaction_batch_status_websocket(scope, receive, send, batch_
 
 
 async def _stream_channel_messages(*, receive, send, channel: str) -> None:
+    """Handle stream channel messages."""
     client = redis_asyncio.from_url(settings.REALTIME_REDIS_URL)
     pubsub = client.pubsub()
     await pubsub.subscribe(channel)
@@ -137,6 +141,7 @@ async def _stream_channel_messages(*, receive, send, channel: str) -> None:
 
 
 async def _forward_pubsub_messages(*, pubsub, send) -> None:
+    """Handle forward pubsub messages."""
     while True:
         message = await pubsub.get_message(
             ignore_subscribe_messages=True,
@@ -156,6 +161,7 @@ async def _forward_pubsub_messages(*, pubsub, send) -> None:
 
 
 async def _wait_for_disconnect(*, receive) -> None:
+    """Handle wait for disconnect."""
     while True:
         message = await receive()
         if message["type"] == "websocket.disconnect":
@@ -163,6 +169,7 @@ async def _wait_for_disconnect(*, receive) -> None:
 
 
 async def _authenticate_websocket_user(scope):
+    """Handle authenticate websocket user."""
     token = get_realtime_auth_token_from_scope(scope)
     if not token:
         return None
@@ -170,12 +177,14 @@ async def _authenticate_websocket_user(scope):
 
 
 def _get_user_from_token(token: str):
+    """Handle get user from token."""
     authentication = JWTAuthentication()
     validated_token = authentication.get_validated_token(token)
     return authentication.get_user(validated_token)
 
 
 def _get_user_transaction(user_id: int, transaction_id: int):
+    """Handle get user transaction."""
     return (
         list_user_transactions(user=_get_user_model_instance(user_id))
         .filter(id=transaction_id)
@@ -184,6 +193,7 @@ def _get_user_transaction(user_id: int, transaction_id: int):
 
 
 def _get_user_transaction_batch(user_id: int, batch_id: int):
+    """Handle get user transaction batch."""
     return (
         TransactionBatch.objects.prefetch_related("items__transaction")
         .filter(id=batch_id, initiated_by_id=user_id)
@@ -192,6 +202,7 @@ def _get_user_transaction_batch(user_id: int, batch_id: int):
 
 
 def _get_user_model_instance(user_id: int):
+    """Handle get user model instance."""
     from django.contrib.auth import get_user_model
 
     return get_user_model().objects.get(id=user_id)

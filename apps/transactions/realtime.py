@@ -18,14 +18,17 @@ logger = logging.getLogger("apps.transactions")
 
 
 def build_transaction_status_channel(*, transaction_id: int) -> str:
+    """Build transaction status channel."""
     return f"{TRANSACTION_STATUS_CHANNEL_PREFIX}.{transaction_id}"
 
 
 def build_transaction_batch_status_channel(*, batch_id: int) -> str:
+    """Build transaction batch status channel."""
     return f"{TRANSACTION_BATCH_STATUS_CHANNEL_PREFIX}.{batch_id}"
 
 
 def serialize_transaction_status(*, transaction: Transaction) -> dict:
+    """Handle serialize transaction status."""
     return {
         "type": "transaction.status",
         "data": TransactionStatusSerializer(transaction).data,
@@ -33,6 +36,7 @@ def serialize_transaction_status(*, transaction: Transaction) -> dict:
 
 
 def serialize_transaction_batch_status(*, batch: TransactionBatch) -> dict:
+    """Handle serialize transaction batch status."""
     return {
         "type": "transaction_batch.status",
         "data": TransactionBatchReadSerializer(batch).data,
@@ -40,6 +44,7 @@ def serialize_transaction_batch_status(*, batch: TransactionBatch) -> dict:
 
 
 def publish_transaction_status_update(*, transaction_id: int) -> None:
+    """Publish transaction status update."""
     transaction = (
         Transaction.objects.select_related("from_account", "to_account")
         .filter(id=transaction_id)
@@ -55,6 +60,7 @@ def publish_transaction_status_update(*, transaction_id: int) -> None:
 
 
 def publish_transaction_batch_status_update(*, batch_id: int) -> None:
+    """Publish transaction batch status update."""
     batch = (
         TransactionBatch.objects.prefetch_related("items__transaction")
         .filter(id=batch_id)
@@ -70,6 +76,7 @@ def publish_transaction_batch_status_update(*, batch_id: int) -> None:
 
 
 def _publish_json_message(*, channel: str, payload: dict) -> None:
+    """Handle publish json message."""
     client = redis.Redis.from_url(settings.REALTIME_REDIS_URL)
     try:
         client.publish(channel, json.dumps(payload, ensure_ascii=True))
@@ -86,6 +93,7 @@ def _publish_json_message(*, channel: str, payload: dict) -> None:
 
 
 def get_realtime_auth_token_from_scope(scope) -> Optional[str]:
+    """Return realtime auth token from scope."""
     query_string = scope.get("query_string", b"").decode("utf-8")
     params = {}
     for chunk in query_string.split("&"):

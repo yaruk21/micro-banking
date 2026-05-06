@@ -11,6 +11,7 @@ QUOTE_CURRENCY = "UAH"
 
 
 def get_privatbank_rates() -> list[dict]:
+    """Return privatbank rates."""
     response = requests.get(PRIVATBANK_EXCHANGE_URL, timeout=5)
     response.raise_for_status()
 

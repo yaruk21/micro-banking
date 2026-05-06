@@ -7,6 +7,7 @@ from apps.transactions.models import Transaction
 
 
 def get_stuck_transaction_ids(*, threshold_seconds: int) -> list[int]:
+    """Return stuck transaction ids."""
     threshold_time = timezone.now() - timedelta(seconds=threshold_seconds)
     return list(
         Transaction.objects.filter(

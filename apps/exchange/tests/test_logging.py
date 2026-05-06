@@ -13,7 +13,9 @@ from core.structured_logging import JsonFormatter, RequestContextFilter, log_eve
 
 
 class ExchangeStructuredLoggingTests(SimpleTestCase):
+    """Test exchange structured logging test behavior."""
     def test_json_formatter_includes_exchange_fields(self):
+        """Test that json formatter includes exchange fields."""
         logger = logging.getLogger("apps.exchange.structured-tests")
         stream = StringIO()
         handler = logging.StreamHandler(stream)
@@ -60,6 +62,7 @@ class ExchangeStructuredLoggingTests(SimpleTestCase):
         mock_sync,
         mock_log_event,
     ):
+        """Test that exchange sync task logs start and finish."""
         mock_sync.return_value = 2
 
         result = sync_privatbank_exchange_rates_task.apply()
@@ -77,6 +80,7 @@ class ExchangeStructuredLoggingTests(SimpleTestCase):
         mock_sync,
         mock_log_event,
     ):
+        """Test that exchange sync task logs failure."""
         mock_sync.side_effect = RuntimeError("provider unavailable")
 
         with self.assertRaises(RuntimeError):

@@ -8,10 +8,12 @@ User = get_user_model()
 
 
 class AccountCreateSerializer(serializers.Serializer):
+    """Serialize and validate account create data."""
     currency = serializers.ChoiceField(choices=Account.Currency.choices)
 
 
 class AccountReadSerializer(serializers.ModelSerializer):
+    """Serialize and validate account read data."""
     balance = serializers.DecimalField(
         max_digits=18,
         decimal_places=2,
@@ -20,17 +22,20 @@ class AccountReadSerializer(serializers.ModelSerializer):
     )
 
     class Meta:
+        """Represent meta."""
         model = Account
         fields = ("id", "iban", "balance", "currency", "created_at")
 
 
 class RegisterSerializer(serializers.Serializer):
+    """Serialize and validate register data."""
     username = serializers.CharField(max_length=150)
     email = serializers.EmailField(required=False, allow_blank=True)
     password = serializers.CharField(write_only=True, style={"input_type": "password"})
     password_confirm = serializers.CharField(write_only=True,style={"input_type": "password"},)
 
     def validate_username(self, value: str) -> str:
+        """Validate username."""
         if User.objects.filter(username=value).exists():
             raise serializers.ValidationError(
                 "A user with this username already exists."
@@ -38,6 +43,7 @@ class RegisterSerializer(serializers.Serializer):
         return value
 
     def validate(self, attrs):
+        """Handle validate."""
         if attrs["password"] != attrs["password_confirm"]:
             raise serializers.ValidationError(
                 {"password_confirm": "Passwords do not match."}

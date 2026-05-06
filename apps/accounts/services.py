@@ -16,6 +16,7 @@ SYSTEM_ACCOUNT_USERNAME = "micro-banking-system"
 
 
 def generate_iban() -> str:
+    """Handle generate iban."""
     while True:
         candidate = f"MB{get_random_string(30, allowed_chars='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')}"
         if not Account.objects.filter(iban=candidate).exists():
@@ -23,6 +24,7 @@ def generate_iban() -> str:
 
 
 def create_account_for_user(*, user: User, currency: str) -> Account:
+    """Create account for user."""
     account = Account.objects.create(
         owner=user,
         currency=currency,
@@ -35,6 +37,7 @@ def create_account_for_user(*, user: User, currency: str) -> Account:
 
 
 def get_or_create_system_account(*, currency: str) -> Account:
+    """Return or create system account."""
     system_account = Account.objects.filter(
         currency=currency,
         is_system=True,
@@ -69,6 +72,7 @@ def get_or_create_system_account(*, currency: str) -> Account:
 
 
 def register_user(*, username: str, password: str, email: str = "") -> User:
+    """Register user."""
     return User.objects.create_user(
         username=username,
         password=password,
@@ -77,6 +81,7 @@ def register_user(*, username: str, password: str, email: str = "") -> User:
 
 
 def build_auth_payload(*, user: User) -> dict:
+    """Build auth payload."""
     refresh = RefreshToken.for_user(user)
     return {
         "user": {

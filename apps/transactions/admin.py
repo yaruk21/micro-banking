@@ -5,6 +5,7 @@ from .models import Transaction
 
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
+    """Configure admin integration for transaction."""
     list_display = (
         "id",
         "from_account",

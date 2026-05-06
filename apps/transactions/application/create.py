@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.db import IntegrityError, transaction as db_transaction
 
 from apps.accounts.models import Account
-from apps.transactions.models import Transaction
+from apps.transactions.models import Transaction, TransactionIdempotencyKey
 from apps.transactions.realtime import publish_transaction_status_update
 from core.structured_logging import log_event
 
@@ -24,7 +24,10 @@ from .types import TransferInput
 logger = logging.getLogger("apps.transactions")
 
 
+# Accepts a client transfer request and preserves async/idempotent semantics.
 def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool]:
+    """Create or replay a transfer using the external idempotency registry."""
+
     from_account = Account.objects.filter(iban=transfer_input.from_account_iban).first()
     to_account = Account.objects.filter(iban=transfer_input.to_account_iban).first()
 
@@ -54,14 +57,21 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
         amount=transfer_input.amount,
     )
 
-    existing_transfer = Transaction.objects.filter(
+    existing_registry = TransactionIdempotencyKey.objects.filter(
         initiated_by=transfer_input.user,
         idempotency_key=effective_idempotency_key,
     ).first()
-    if existing_transfer is not None:
+    if existing_registry is not None:
+        existing_transfer = Transaction.objects.filter(
+            id=existing_registry.transaction_id,
+        ).first()
+        if existing_transfer is None:
+            raise TransactionValidationError(
+                "Existing transaction could not be resolved for the idempotency key."
+            )
         try:
             validate_request_fingerprint(
-                transfer=existing_transfer,
+                existing_request_fingerprint=existing_registry.request_fingerprint,
                 request_fingerprint=request_fingerprint,
             )
         except IdempotencyConflictError:
@@ -103,19 +113,33 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
                 fee_currency=fee_currency,
                 status=Transaction.Status.PENDING,
             )
+            TransactionIdempotencyKey.objects.create(
+                initiated_by=transfer_input.user,
+                idempotency_key=effective_idempotency_key,
+                request_fingerprint=request_fingerprint,
+                transaction_id=transfer.id,
+            )
             outbox = create_transaction_outbox(transaction=transfer)
             register_transaction_outbox_publish(outbox_id=outbox.id)
     except IntegrityError:
-        existing_transfer = Transaction.objects.filter(
+        existing_registry = TransactionIdempotencyKey.objects.filter(
             initiated_by=transfer_input.user,
             idempotency_key=effective_idempotency_key,
         ).first()
-        if existing_transfer is None:
+        if existing_registry is None:
             raise
+
+        existing_transfer = Transaction.objects.filter(
+            id=existing_registry.transaction_id,
+        ).first()
+        if existing_transfer is None:
+            raise TransactionValidationError(
+                "Existing transaction could not be resolved for the idempotency key."
+            )
 
         try:
             validate_request_fingerprint(
-                transfer=existing_transfer,
+                existing_request_fingerprint=existing_registry.request_fingerprint,
                 request_fingerprint=request_fingerprint,
             )
         except IdempotencyConflictError:
@@ -149,11 +173,14 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
     return transfer, True
 
 
+# Emits a structured log when the same idempotency key is reused with a new payload.
 def _log_idempotency_conflict(
     *,
     transfer: Transaction,
     request_fingerprint: str,
 ) -> None:
+    """Write a structured conflict log for idempotency mismatches."""
+
     log_event(
         logger,
         logging.WARNING,
@@ -170,7 +197,10 @@ def _log_idempotency_conflict(
     )
 
 
+# Emits a structured log when an existing transaction is returned for a replay.
 def _log_replayed_transaction(transfer: Transaction) -> None:
+    """Write a structured replay log for successful idempotent retries."""
+
     log_event(
         logger,
         logging.INFO,

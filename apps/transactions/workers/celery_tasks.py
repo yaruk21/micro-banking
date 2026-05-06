@@ -11,6 +11,7 @@ from apps.transactions.application import (
     process_transaction_batch,
     process_transfer,
 )
+from apps.transactions.partitioning import ensure_transaction_partitions
 from core.logging_context import (
     reset_correlation_id,
     reset_task_id,
@@ -24,6 +25,7 @@ logger = logging.getLogger("apps.transactions")
 
 @shared_task(bind=True)
 def publish_pending_transaction_outbox_task(self, limit: Optional[int] = None) -> int:
+    """Publish pending transaction outbox task."""
     task_token = set_task_id(self.request.id)
     try:
         published_count = publish_pending_transaction_outbox(
@@ -54,6 +56,7 @@ def publish_pending_transaction_outbox_task(self, limit: Optional[int] = None) -
     reject_on_worker_lost=True,
 )
 def process_transaction_batch_task(self, batch_id: int) -> None:
+    """Process transaction batch task."""
     task_token = set_task_id(self.request.id)
     try:
         log_event(
@@ -97,6 +100,7 @@ def process_transfer_task(
     transaction_id: int,
     correlation_id: Optional[str] = None,
 ) -> None:
+    """Process transfer task."""
     correlation_token = set_correlation_id(correlation_id)
     task_token = set_task_id(self.request.id)
     try:
@@ -126,6 +130,7 @@ def process_transfer_task(
 
 @shared_task(bind=True)
 def recover_stuck_transfers_task(self) -> int:
+    """Recover stuck transfers task."""
     task_token = set_task_id(self.request.id)
     transaction_ids = get_stuck_transaction_ids(
         threshold_seconds=settings.TRANSACTION_STUCK_THRESHOLD_SECONDS
@@ -145,5 +150,27 @@ def recover_stuck_transfers_task(self) -> int:
                 task_id=self.request.id,
             )
         return len(transaction_ids)
+    finally:
+        reset_task_id(task_token)
+
+
+@shared_task(bind=True)
+def ensure_transaction_partitions_task(self) -> int:
+    """Ensure future monthly transaction partitions exist."""
+    task_token = set_task_id(self.request.id)
+    try:
+        created_count = ensure_transaction_partitions(
+            months_ahead=settings.TRANSACTION_PARTITION_MONTHS_AHEAD
+        )
+        log_event(
+            logger,
+            logging.INFO,
+            "transaction.partitions_ensured",
+            message="Scheduled transaction partition maintenance finished.",
+            created_count=created_count,
+            months_ahead=settings.TRANSACTION_PARTITION_MONTHS_AHEAD,
+            task_id=self.request.id,
+        )
+        return created_count
     finally:
         reset_task_id(task_token)

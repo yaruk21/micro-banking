@@ -4,6 +4,7 @@ from apps.accounts.models import Account
 
 
 class ExchangeRate(models.Model):
+    """Represent exchange rate."""
     base_currency = models.CharField(max_length=3, choices=Account.Currency.choices, db_index=True)
     quote_currency = models.CharField(max_length=3, choices=Account.Currency.choices, db_index=True)
     rate = models.DecimalField(max_digits=20, decimal_places=8)
@@ -13,6 +14,7 @@ class ExchangeRate(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        """Represent meta."""
         constraints = [
             models.UniqueConstraint(
                 fields=["base_currency", "quote_currency", "provider"],

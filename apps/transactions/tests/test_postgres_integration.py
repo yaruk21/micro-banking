@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from decimal import Decimal
 from threading import Barrier
 from unittest import skipUnless
@@ -15,13 +16,20 @@ from apps.transactions.application import (
     process_transfer,
 )
 from apps.transactions.models import Transaction
+from apps.transactions.partitioning import ensure_transaction_partitions
 
 User = get_user_model()
 
 
 @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL test database")
+# Exercises PostgreSQL-only behavior that SQLite cannot validate.
 class TransactionPostgresIntegrationTests(TransactionTestCase):
+    """Validate concurrency, indexes, and partitioning on PostgreSQL."""
+
+    # Creates isolated users for each PostgreSQL integration scenario.
     def setUp(self):
+        """Create baseline users used by PostgreSQL integration tests."""
+
         self.user = User.objects.create_user(
             username="pg-alice",
             password="testpass123",
@@ -31,11 +39,17 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
             password="testpass123",
         )
 
+    # Runs callbacks in parallel threads to reproduce locking and race conditions.
     def _run_concurrently(self, *callbacks):
+        """Execute several callbacks concurrently and return their results."""
+
         barrier = Barrier(len(callbacks))
         results = [None] * len(callbacks)
 
+        # Gives each worker its own DB connection and synchronized start line.
         def run_callback(index, callback):
+            """Execute one callback in its own thread-safe database context."""
+
             connections.close_all()
             try:
                 barrier.wait(timeout=5)
@@ -54,7 +68,10 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
         close_old_connections()
         return results
 
+    # Verifies that the transaction hot-path indexes exist in PostgreSQL.
     def test_transaction_hot_path_indexes_exist(self):
+        """The expected transaction indexes should exist after migrations."""
+
         with connection.cursor() as cursor:
             constraints = connection.introspection.get_constraints(
                 cursor,
@@ -63,8 +80,15 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
 
         self.assertIn("transaction_from_created_idx", constraints)
         self.assertIn("transaction_to_created_idx", constraints)
+        self.assertIn("txn_id_idx", constraints)
+        self.assertIn("txn_status_idx", constraints)
+        self.assertIn("txn_created_at_idx", constraints)
         self.assertIn("txn_status_created_idx", constraints)
         self.assertIn("txn_status_proc_started_idx", constraints)
+        self.assertEqual(
+            constraints["txn_id_idx"]["columns"],
+            ["id"],
+        )
         self.assertEqual(
             constraints["txn_status_created_idx"]["columns"],
             ["status", "created_at"],
@@ -74,7 +98,72 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
             ["status", "processing_started_at"],
         )
 
+    # Verifies that the parent transaction table is truly range-partitioned.
+    def test_transaction_table_is_monthly_range_partitioned(self):
+        """The transaction table should be monthly range-partitioned on created_at."""
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT pg_get_partkeydef(c.oid), p.partstrat
+                FROM pg_partitioned_table p
+                JOIN pg_class c ON c.oid = p.partrelid
+                WHERE c.relname = %s
+                """,
+                [Transaction._meta.db_table],
+            )
+            row = cursor.fetchone()
+            self.assertIsNotNone(row)
+            partkeydef, strategy = row
+
+            cursor.execute(
+                """
+                SELECT c.relname
+                FROM pg_inherits i
+                JOIN pg_class c ON c.oid = i.inhrelid
+                JOIN pg_class p ON p.oid = i.inhparent
+                WHERE p.relname = %s
+                ORDER BY c.relname
+                """,
+                [Transaction._meta.db_table],
+            )
+            partition_names = [name for (name,) in cursor.fetchall()]
+
+        self.assertEqual(strategy, "r")
+        self.assertEqual(partkeydef, "RANGE (created_at)")
+        self.assertIn("transactions_transaction_default", partition_names)
+        self.assertTrue(
+            any(name.startswith("transactions_transaction_y") for name in partition_names)
+        )
+
+    # Ensures the maintenance helper can pre-create missing monthly partitions.
+    def test_ensure_transaction_partitions_creates_future_partition(self):
+        """ensure_transaction_partitions should create a missing future monthly partition."""
+
+        future_partition_name = "transactions_transaction_y2026m09"
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DROP TABLE IF EXISTS transactions_transaction_y2026m09"
+            )
+            cursor.execute("SELECT to_regclass(%s)", [future_partition_name])
+            self.assertIsNone(cursor.fetchone()[0])
+
+        created_count = ensure_transaction_partitions(
+            months_ahead=3,
+            now=datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertGreaterEqual(created_count, 1)
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass(%s)", [future_partition_name])
+            self.assertEqual(cursor.fetchone()[0], future_partition_name)
+
+    # Ensures concurrent idempotent submits collapse into a single transaction.
     def test_concurrent_create_transfer_reuses_single_transaction(self):
+        """Concurrent identical submissions should reuse one transaction row."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBP00000000000000000000000000011",
@@ -88,7 +177,10 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
             balance=Decimal("0.00"),
         )
 
+        # Submits the exact same transfer payload from two threads.
         def submit_transfer():
+            """Create the same transfer payload inside one concurrent worker."""
+
             transfer, created = create_transfer(
                 transfer_input=TransferInput(
                     user=self.user,
@@ -110,7 +202,10 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
         self.assertEqual(sum(1 for _, created in results if created), 1)
         self.assertEqual(sum(1 for _, created in results if not created), 1)
 
+    # Ensures concurrent mismatched payloads produce one success and one conflict.
     def test_concurrent_create_transfer_with_different_payload_returns_conflict(self):
+        """Concurrent requests with one reused key and different payloads should conflict."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBP00000000000000000000000000021",
@@ -124,8 +219,14 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
             balance=Decimal("0.00"),
         )
 
+        # Wraps transfer creation so each thread can race with a different amount.
         def submit_transfer(amount):
+            """Build a concurrent worker that submits one amount variant."""
+
+            # Performs one transfer attempt and normalizes the result for assertions.
             def callback():
+                """Submit one transfer attempt inside the worker thread."""
+
                 try:
                     transfer, created = create_transfer(
                         transfer_input=TransferInput(
@@ -157,7 +258,10 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
         self.assertEqual(len(successful_results), 1)
         self.assertTrue(successful_results[0][2])
 
+    # Ensures two workers cannot apply the same completed movement twice.
     def test_concurrent_process_transfer_applies_money_movement_once(self):
+        """Concurrent processing of one transfer should move money only once."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBP00000000000000000000000000031",
@@ -182,7 +286,10 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
 
         self.assertTrue(created)
 
+        # Processes the same transaction from two concurrent workers.
         def process_existing_transfer():
+            """Run process_transfer for the same transaction from one worker."""
+
             processed_transfer = process_transfer(transaction_id=transfer.id)
             return processed_transfer.status
 
@@ -203,7 +310,10 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
         self.assertEqual(from_account.balance, Decimal("70.00"))
         self.assertEqual(to_account.balance, Decimal("30.00"))
 
+    # Ensures locking prevents two concurrent transfers from overdrawing one sender.
     def test_concurrent_processing_prevents_double_spend(self):
+        """Concurrent transfers from one balance should allow only one completion."""
+
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBP00000000000000000000000000041",

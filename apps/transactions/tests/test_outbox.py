@@ -18,7 +18,9 @@ User = get_user_model()
 
 
 class TransactionOutboxTests(TestCase):
+    """Test transaction outbox test behavior."""
     def setUp(self):
+        """Handle set up."""
         self.user = User.objects.create_user(
             username="outbox-alice",
             password="pass123",
@@ -41,6 +43,7 @@ class TransactionOutboxTests(TestCase):
         )
 
     def test_create_transfer_creates_pending_outbox_entry(self):
+        """Test that create transfer creates pending outbox entry."""
         transfer, created = create_transfer(
             transfer_input=TransferInput(
                 user=self.user,
@@ -59,6 +62,7 @@ class TransactionOutboxTests(TestCase):
 
     @patch("apps.transactions.workers.celery_tasks.process_transfer_task.delay")
     def test_publish_transaction_outbox_marks_entry_as_dispatched(self, mock_delay):
+        """Test that publish transaction outbox marks entry as dispatched."""
         mock_delay.return_value = SimpleNamespace(id="celery-dispatch-1")
         transfer, created = create_transfer(
             transfer_input=TransferInput(
@@ -84,6 +88,7 @@ class TransactionOutboxTests(TestCase):
 
     @patch("apps.transactions.workers.celery_tasks.process_transfer_task.delay")
     def test_publish_transaction_outbox_persists_dispatch_error(self, mock_delay):
+        """Test that publish transaction outbox persists dispatch error."""
         mock_delay.side_effect = RuntimeError("broker unavailable")
         transfer, created = create_transfer(
             transfer_input=TransferInput(
@@ -111,6 +116,7 @@ class TransactionOutboxTests(TestCase):
         self,
         mock_delay,
     ):
+        """Test that publish pending transaction outbox dispatches only pending entries."""
         mock_delay.side_effect = [
             SimpleNamespace(id="celery-batch-1"),
             SimpleNamespace(id="celery-batch-2"),

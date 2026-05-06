@@ -11,6 +11,7 @@ logger = logging.getLogger("apps.transactions")
 
 
 def create_transaction_outbox(*, transaction: Transaction) -> TransactionOutbox:
+    """Create transaction outbox."""
     outbox = TransactionOutbox.objects.create(
         transaction=transaction,
         correlation_id=get_correlation_id() or "",
@@ -29,12 +30,14 @@ def create_transaction_outbox(*, transaction: Transaction) -> TransactionOutbox:
 
 
 def register_transaction_outbox_publish(*, outbox_id: int) -> None:
+    """Register transaction outbox publish."""
     db_transaction.on_commit(
         lambda: publish_transaction_outbox(outbox_id=outbox_id)
     )
 
 
 def publish_transaction_outbox(*, outbox_id: int) -> bool:
+    """Publish transaction outbox."""
     from apps.transactions.workers.celery_tasks import process_transfer_task
 
     with db_transaction.atomic():
@@ -100,6 +103,7 @@ def publish_transaction_outbox(*, outbox_id: int) -> bool:
 
 
 def get_pending_transaction_outbox_ids(*, limit: int = 100) -> list[int]:
+    """Return pending transaction outbox ids."""
     return list(
         TransactionOutbox.objects.filter(published_at__isnull=True)
         .order_by("created_at", "id")
@@ -108,6 +112,7 @@ def get_pending_transaction_outbox_ids(*, limit: int = 100) -> list[int]:
 
 
 def publish_pending_transaction_outbox(*, limit: int = 100) -> int:
+    """Publish pending transaction outbox."""
     published_count = 0
 
     for outbox_id in get_pending_transaction_outbox_ids(limit=limit):

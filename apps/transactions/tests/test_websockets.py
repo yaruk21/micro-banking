@@ -21,16 +21,21 @@ User = get_user_model()
 
 
 class FakeAsyncPubSub:
+    """Represent fake async pub sub."""
     def __init__(self):
+        """Handle init."""
         self.messages = asyncio.Queue()
 
     async def subscribe(self, channel):
+        """Handle subscribe."""
         self.channel = channel
 
     async def unsubscribe(self, channel):
+        """Handle unsubscribe."""
         return None
 
     async def get_message(self, ignore_subscribe_messages=True, timeout=1.0):
+        """Return message."""
         try:
             return self.messages.get_nowait()
         except asyncio.QueueEmpty:
@@ -38,22 +43,29 @@ class FakeAsyncPubSub:
             return None
 
     async def close(self):
+        """Handle close."""
         return None
 
 
 class FakeAsyncRedisClient:
+    """Represent fake async redis client."""
     def __init__(self, pubsub):
+        """Handle init."""
         self._pubsub = pubsub
 
     def pubsub(self):
+        """Handle pubsub."""
         return self._pubsub
 
     async def aclose(self):
+        """Handle aclose."""
         return None
 
 
 class TransactionWebSocketTests(TestCase):
+    """Test transaction web socket test behavior."""
     def setUp(self):
+        """Handle set up."""
         self.user = User.objects.create_user(
             username="ws-alice",
             password="pass123",
@@ -65,6 +77,7 @@ class TransactionWebSocketTests(TestCase):
 
     @patch("apps.transactions.realtime.redis.Redis.from_url")
     def test_publish_transaction_status_update_publishes_json_payload(self, mock_from_url):
+        """Test that publish transaction status update publishes json payload."""
         client = MagicMock()
         mock_from_url.return_value = client
         from_account = Account.objects.create(
@@ -99,6 +112,7 @@ class TransactionWebSocketTests(TestCase):
         self.assertEqual(message["data"]["id"], transaction.id)
 
     def test_transaction_websocket_sends_snapshot_and_realtime_update(self):
+        """Test that transaction websocket sends snapshot and realtime update."""
         from_account = Account.objects.create(
             owner=self.user,
             iban="MBW00000000000000000000000000021",
@@ -123,6 +137,7 @@ class TransactionWebSocketTests(TestCase):
         token = str(AccessToken.for_user(self.user))
 
         async def scenario():
+            """Handle scenario."""
             pubsub = FakeAsyncPubSub()
             client = FakeAsyncRedisClient(pubsub)
 
@@ -171,6 +186,7 @@ class TransactionWebSocketTests(TestCase):
         async_to_sync(scenario)()
 
     def test_transaction_batch_websocket_sends_snapshot(self):
+        """Test that transaction batch websocket sends snapshot."""
         batch = TransactionBatch.objects.create(
             initiated_by=self.user,
             idempotency_key="ws-batch-1",
@@ -181,6 +197,7 @@ class TransactionWebSocketTests(TestCase):
         token = str(AccessToken.for_user(self.user))
 
         async def scenario():
+            """Handle scenario."""
             pubsub = FakeAsyncPubSub()
             client = FakeAsyncRedisClient(pubsub)
 
@@ -211,6 +228,7 @@ class TransactionWebSocketTests(TestCase):
 
     @patch("apps.transactions.realtime.redis.Redis.from_url")
     def test_publish_transaction_batch_status_update_publishes_json_payload(self, mock_from_url):
+        """Test that publish transaction batch status update publishes json payload."""
         client = MagicMock()
         mock_from_url.return_value = client
         batch = TransactionBatch.objects.create(

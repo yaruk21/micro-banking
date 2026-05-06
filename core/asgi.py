@@ -10,6 +10,7 @@ django_asgi_application = get_asgi_application()
 
 
 async def application(scope, receive, send):
+    """Handle application."""
     if scope["type"] == "websocket":
         await websocket_status_application(scope, receive, send)
         return

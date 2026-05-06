@@ -40,6 +40,7 @@ STRUCTURED_LOG_FIELDS = (
 
 
 def normalize_log_value(value: Any) -> Any:
+    """Normalize log value."""
     if isinstance(value, Decimal):
         return format(value, "f")
     if isinstance(value, (datetime, date)):
@@ -61,6 +62,7 @@ def log_event(
     message: Optional[str] = None,
     **fields: Any,
 ) -> None:
+    """Handle log event."""
     logger.log(
         level,
         message or event,
@@ -72,7 +74,9 @@ def log_event(
 
 
 class RequestContextFilter(logging.Filter):
+    """Filter request context query results."""
     def filter(self, record: logging.LogRecord) -> bool:
+        """Handle filter."""
         if getattr(record, "correlation_id", None) is None:
             record.correlation_id = get_correlation_id()
         if getattr(record, "task_id", None) is None:
@@ -85,7 +89,9 @@ class RequestContextFilter(logging.Filter):
 
 
 class JsonFormatter(logging.Formatter):
+    """Format json output."""
     def format(self, record: logging.LogRecord) -> str:
+        """Handle format."""
         payload = {
             "timestamp": self.formatTime(record, self.datefmt),
             "level": record.levelname,
@@ -105,12 +111,15 @@ class JsonFormatter(logging.Formatter):
 
 
 class RequestIdMiddleware:
+    """Provide request id middleware behavior."""
     header_name = "X-Request-ID"
 
     def __init__(self, get_response):
+        """Handle init."""
         self.get_response = get_response
 
     def __call__(self, request):
+        """Handle call."""
         correlation_id = request.headers.get(self.header_name, "").strip() or str(uuid4())
         request.request_id = correlation_id
         request.correlation_id = correlation_id
