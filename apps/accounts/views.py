@@ -2,7 +2,8 @@ from django.conf import settings
 from django.core.cache import cache
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle
+from rest_framework_simplejwt.views import TokenObtainPairView
 
 from core.cache_utils import build_user_cache_key, get_user_cache_version
 
@@ -99,3 +100,10 @@ class RegisterView(generics.GenericAPIView):
             build_auth_payload(user=user),
             status=status.HTTP_201_CREATED,
         )
+
+
+class TokenObtainPairThrottledView(TokenObtainPairView):
+    """Handle login API requests with a dedicated brute-force throttle."""
+
+    throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
+    throttle_scope = "auth_login"

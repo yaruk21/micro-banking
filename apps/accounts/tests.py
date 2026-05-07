@@ -157,6 +157,34 @@ class AccountApiTests(APITestCase):
             "35.00",
         )
 
+    def test_login_endpoint_is_rate_limited(self):
+        """Test that repeated login attempts are throttled."""
+        cache.clear()
+
+        login_payload = {
+            "username": "alice",
+            "password": "wrong-password",
+        }
+
+        responses = [
+            self.client.post(
+                reverse("token_obtain_pair"),
+                login_payload,
+                format="json",
+            )
+            for _ in range(6)
+        ]
+
+        for response in responses[:5]:
+            self.assertEqual(
+                response.status_code,
+                status.HTTP_401_UNAUTHORIZED,
+            )
+        self.assertEqual(
+            responses[5].status_code,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
 
 class AccountSelectorReplicaRoutingTests(SimpleTestCase):
     """Test account selector replica routing behavior."""

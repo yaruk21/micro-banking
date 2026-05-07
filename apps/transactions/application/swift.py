@@ -61,7 +61,6 @@ def process_swift_transfer(*, transaction_id: int) -> Transaction:
     with db_transaction.atomic():
         transfer = (
             Transaction.objects.select_for_update()
-            .select_related("from_account", "swift_details")
             .filter(id=transaction_id)
             .first()
         )

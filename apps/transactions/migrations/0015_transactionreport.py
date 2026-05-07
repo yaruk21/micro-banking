@@ -5,13 +5,13 @@ import django.db.models.deletion
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("transactions", "0013_fraudevent"),
+        ("transactions", "0014_transactionchallenge"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.CreateModel(
-            name="TransactionChallenge",
+            name="TransactionReport",
             fields=[
                 (
                     "id",
@@ -22,42 +22,41 @@ class Migration(migrations.Migration):
                         verbose_name="ID",
                     ),
                 ),
+                ("date_from", models.DateField()),
+                ("date_to", models.DateField()),
                 (
                     "status",
                     models.CharField(
                         choices=[
                             ("pending", "Pending"),
-                            ("verified", "Verified"),
+                            ("processing", "Processing"),
+                            ("completed", "Completed"),
                             ("failed", "Failed"),
-                            ("expired", "Expired"),
                         ],
                         db_index=True,
                         default="pending",
                         max_length=16,
                     ),
                 ),
-                ("code_hash", models.CharField(max_length=255)),
-                ("reason_codes", models.CharField(blank=True, max_length=255)),
-                ("attempts_count", models.PositiveSmallIntegerField(default=0)),
-                ("max_attempts", models.PositiveSmallIntegerField(default=3)),
-                ("expires_at", models.DateTimeField(db_index=True)),
-                ("verified_at", models.DateTimeField(blank=True, null=True)),
-                ("created_at", models.DateTimeField(auto_now_add=True, db_index=True)),
-                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("file_name", models.CharField(blank=True, max_length=255)),
                 (
-                    "transaction",
-                    models.OneToOneField(
-                        db_constraint=False,
-                        on_delete=django.db.models.deletion.CASCADE,
-                        related_name="challenge",
-                        to="transactions.transaction",
+                    "content_type",
+                    models.CharField(
+                        blank=True,
+                        default="application/pdf",
+                        max_length=100,
                     ),
                 ),
+                ("pdf_content", models.BinaryField(blank=True, null=True)),
+                ("failure_reason", models.TextField(blank=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True, db_index=True)),
+                ("processing_started_at", models.DateTimeField(blank=True, null=True)),
+                ("completed_at", models.DateTimeField(blank=True, null=True)),
                 (
                     "user",
                     models.ForeignKey(
                         on_delete=django.db.models.deletion.CASCADE,
-                        related_name="transaction_challenges",
+                        related_name="transaction_reports",
                         to=settings.AUTH_USER_MODEL,
                     ),
                 ),
@@ -67,10 +66,17 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.AddIndex(
-            model_name="transactionchallenge",
+            model_name="transactionreport",
             index=models.Index(
                 fields=("user", "status", "created_at"),
-                name="txn_challenge_user_status_idx",
+                name="txn_report_user_status_idx",
+            ),
+        ),
+        migrations.AddConstraint(
+            model_name="transactionreport",
+            constraint=models.CheckConstraint(
+                check=models.Q(("date_to__gte", models.F("date_from"))),
+                name="txn_report_date_range_valid",
             ),
         ),
     ]

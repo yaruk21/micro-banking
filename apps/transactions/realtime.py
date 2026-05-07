@@ -5,8 +5,10 @@ from typing import Optional
 import redis
 from django.conf import settings
 
-from apps.transactions.api.serializers import (
+from apps.transactions.api.serializers.batches import (
     TransactionBatchReadSerializer,
+)
+from apps.transactions.api.serializers.transactions import (
     TransactionStatusSerializer,
 )
 from apps.transactions.models import Transaction, TransactionBatch

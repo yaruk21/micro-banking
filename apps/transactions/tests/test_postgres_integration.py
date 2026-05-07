@@ -1,10 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from threading import Barrier
 from unittest import skipUnless
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import make_password
 from django.db import close_old_connections, connection, connections
 from django.test import TransactionTestCase
 
@@ -13,9 +14,11 @@ from apps.transactions.application import (
     IdempotencyConflictError,
     TransferInput,
     create_transfer,
+    confirm_transaction_challenge,
     process_transfer,
 )
-from apps.transactions.models import Transaction
+from apps.transactions.application.challenge import sync_transaction_challenge_state
+from apps.transactions.models import Transaction, TransactionChallenge
 from apps.transactions.partitioning import ensure_transaction_partitions
 
 User = get_user_model()
@@ -383,3 +386,46 @@ class TransactionPostgresIntegrationTests(TransactionTestCase):
             sorted([first_transfer.status, second_transfer.status]),
             [Transaction.Status.COMPLETED, Transaction.Status.FAILED],
         )
+
+    def test_pending_challenge_helpers_work_on_postgres_without_outer_join_locking(self):
+        """Challenge status sync and confirm should work on PostgreSQL without join-lock errors."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBP00000000000000000000000000051",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBP00000000000000000000000000052",
+            currency=Account.Currency.USD,
+            balance=Decimal("0.00"),
+        )
+        transaction = Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=from_account,
+            to_account=to_account,
+            idempotency_key="pg-challenge-1",
+            request_fingerprint="pg-challenge-1",
+            amount=Decimal("25.00"),
+            status=Transaction.Status.PENDING,
+        )
+        TransactionChallenge.objects.create(
+            user=self.user,
+            transaction=transaction,
+            status=TransactionChallenge.Status.PENDING,
+            code_hash=make_password("123456"),
+            reason_codes="large_amount",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+
+        synced_transaction = sync_transaction_challenge_state(transaction=transaction)
+        confirmed_transaction = confirm_transaction_challenge(
+            user=self.user,
+            transaction_id=transaction.id,
+            code="123456",
+        )
+
+        self.assertEqual(synced_transaction.id, transaction.id)
+        self.assertEqual(confirmed_transaction.id, transaction.id)

@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -5,18 +6,21 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import Account
 from apps.accounts.services import SYSTEM_ACCOUNT_USERNAME
 from apps.exchange.models import ExchangeRate
+from core.cache_utils import bump_user_cache_version
 from apps.transactions.models import (
     FraudEvent,
     SwiftTransferDetails,
     Transaction,
     TransactionChallenge,
     TransactionOutbox,
+    TransactionReport,
 )
 from apps.transactions.selectors import list_user_transactions
 
@@ -171,6 +175,261 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(from_account.balance, Decimal("5.00"))
         self.assertEqual(to_account.balance, Decimal("0.00"))
         self.assertEqual(Transaction.objects.get().status, Transaction.Status.FAILED)
+
+    def test_transaction_analytics_summary_returns_status_totals_and_cashflow(self):
+        """Analytics summary should aggregate user-visible transaction activity."""
+
+        own_usd_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000101",
+            currency=Account.Currency.USD,
+            balance=Decimal("1000.00"),
+        )
+        own_eur_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000102",
+            currency=Account.Currency.EUR,
+            balance=Decimal("1000.00"),
+        )
+        bob_usd_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000103",
+            currency=Account.Currency.USD,
+            balance=Decimal("1000.00"),
+        )
+
+        outgoing_completed = Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=own_usd_account,
+            to_account=bob_usd_account,
+            idempotency_key="analytics-outgoing-completed",
+            request_fingerprint="analytics-outgoing-completed",
+            amount=Decimal("25.00"),
+            credited_amount=Decimal("25.00"),
+            status=Transaction.Status.COMPLETED,
+        )
+        incoming_completed = Transaction.objects.create(
+            initiated_by=self.other_user,
+            from_account=bob_usd_account,
+            to_account=own_eur_account,
+            idempotency_key="analytics-incoming-completed",
+            request_fingerprint="analytics-incoming-completed",
+            amount=Decimal("50.00"),
+            credited_amount=Decimal("40.00"),
+            exchange_rate=Decimal("0.80000000"),
+            status=Transaction.Status.COMPLETED,
+        )
+        Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=own_eur_account,
+            to_account=None,
+            idempotency_key="analytics-swift-failed",
+            request_fingerprint="analytics-swift-failed",
+            amount=Decimal("70.00"),
+            status=Transaction.Status.FAILED,
+            transfer_type=Transaction.TransferType.SWIFT,
+        )
+        Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=own_usd_account,
+            to_account=bob_usd_account,
+            idempotency_key="analytics-pending",
+            request_fingerprint="analytics-pending",
+            amount=Decimal("10.00"),
+            status=Transaction.Status.PENDING,
+        )
+        Transaction.objects.filter(id=outgoing_completed.id).update(
+            created_at="2026-05-05T10:00:00Z"
+        )
+        Transaction.objects.filter(id=incoming_completed.id).update(
+            created_at="2026-05-06T10:00:00Z"
+        )
+
+        response = self.client.get(
+            reverse("transaction-analytics-summary"),
+            {
+                "date_from": "2026-05-05",
+                "date_to": "2026-05-06",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["totals"]["total_transactions"], 2)
+        self.assertEqual(response.data["totals"]["completed_transactions"], 2)
+        self.assertEqual(response.data["totals"]["pending_transactions"], 0)
+        self.assertEqual(response.data["totals"]["failed_transactions"], 0)
+        self.assertEqual(response.data["totals"]["completed_outgoing_amount"], "25.00")
+        self.assertEqual(response.data["totals"]["completed_incoming_amount"], "40.00")
+        self.assertEqual(response.data["totals"]["net_completed_cashflow"], "15.00")
+        self.assertEqual(
+            response.data["by_currency"],
+            [
+                {
+                    "currency": "EUR",
+                    "outgoing_transactions": 0,
+                    "incoming_transactions": 1,
+                    "completed_outgoing_amount": "0.00",
+                    "completed_incoming_amount": "40.00",
+                    "net_completed_cashflow": "40.00",
+                },
+                {
+                    "currency": "USD",
+                    "outgoing_transactions": 1,
+                    "incoming_transactions": 0,
+                    "completed_outgoing_amount": "25.00",
+                    "completed_incoming_amount": "0.00",
+                    "net_completed_cashflow": "-25.00",
+                },
+            ],
+        )
+        self.assertEqual(
+            response.data["by_transfer_type"],
+            [
+                {
+                    "transfer_type": Transaction.TransferType.INTERNAL,
+                    "total_transactions": 2,
+                    "completed_transactions": 2,
+                    "total_amount": "75.00",
+                }
+            ],
+        )
+
+    def test_transaction_analytics_summary_uses_cache_until_version_bump(self):
+        """Analytics summary should reuse cached payload until transaction cache version changes."""
+
+        own_usd_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000111",
+            currency=Account.Currency.USD,
+            balance=Decimal("1000.00"),
+        )
+        bob_usd_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000112",
+            currency=Account.Currency.USD,
+            balance=Decimal("1000.00"),
+        )
+        transaction = Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=own_usd_account,
+            to_account=bob_usd_account,
+            idempotency_key="analytics-cache-1",
+            request_fingerprint="analytics-cache-1",
+            amount=Decimal("25.00"),
+            credited_amount=Decimal("25.00"),
+            status=Transaction.Status.COMPLETED,
+        )
+
+        url = reverse("transaction-analytics-summary")
+        first_response = self.client.get(url)
+        Transaction.objects.filter(id=transaction.id).update(amount=Decimal("40.00"))
+        second_response = self.client.get(url)
+        bump_user_cache_version(namespace="transactions_list", user_id=self.user.id)
+        third_response = self.client.get(url)
+
+        self.assertEqual(
+            first_response.data["totals"]["completed_outgoing_amount"],
+            "25.00",
+        )
+        self.assertEqual(
+            second_response.data["totals"]["completed_outgoing_amount"],
+            "25.00",
+        )
+        self.assertEqual(
+            third_response.data["totals"]["completed_outgoing_amount"],
+            "40.00",
+        )
+
+    def test_transaction_analytics_summary_rejects_invalid_date_range(self):
+        """Analytics summary should validate the requested date range."""
+
+        response = self.client.get(
+            reverse("transaction-analytics-summary"),
+            {
+                "date_from": "2026-05-07",
+                "date_to": "2026-05-06",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("date_to", response.data)
+
+    @patch("apps.transactions.application.reporting._dispatch_transaction_report")
+    def test_transaction_report_create_endpoint_queues_background_generation(
+        self,
+        mock_dispatch_report,
+    ):
+        """Report create endpoint should persist a pending report and dispatch async work."""
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("transaction-report-create"),
+                {
+                    "date_from": "2026-05-01",
+                    "date_to": "2026-05-07",
+                },
+                format="json",
+            )
+
+        report = TransactionReport.objects.get()
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(report.status, TransactionReport.Status.PENDING)
+        self.assertEqual(str(report.date_from), "2026-05-01")
+        self.assertEqual(str(report.date_to), "2026-05-07")
+        mock_dispatch_report.assert_called_once_with(report_id=report.id)
+
+    def test_transaction_report_status_and_download_endpoints(self):
+        """Completed reports should expose status metadata and downloadable PDF content."""
+
+        report = TransactionReport.objects.create(
+            user=self.user,
+            date_from=timezone.datetime(2026, 5, 1).date(),
+            date_to=timezone.datetime(2026, 5, 7).date(),
+            status=TransactionReport.Status.COMPLETED,
+            file_name="transaction-report-test.pdf",
+            pdf_content=b"%PDF-1.4\nreport\n",
+            completed_at=timezone.now(),
+        )
+
+        status_response = self.client.get(
+            reverse("transaction-report-status", kwargs={"pk": report.id})
+        )
+        download_response = self.client.get(
+            reverse("transaction-report-download", kwargs={"pk": report.id})
+        )
+
+        self.assertEqual(status_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(status_response.data["status"], TransactionReport.Status.COMPLETED)
+        self.assertIn("/api/transactions/reports/", status_response.data["download_url"])
+        self.assertEqual(download_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(download_response["Content-Type"], "application/pdf")
+        self.assertIn(
+            'attachment; filename="transaction-report-test.pdf"',
+            download_response["Content-Disposition"],
+        )
+        self.assertEqual(download_response.content, b"%PDF-1.4\nreport\n")
+
+    def test_transaction_report_download_endpoint_returns_conflict_while_pending(self):
+        """Pending reports should not be downloadable yet."""
+
+        report = TransactionReport.objects.create(
+            user=self.user,
+            date_from=timezone.datetime(2026, 5, 1).date(),
+            date_to=timezone.datetime(2026, 5, 7).date(),
+            status=TransactionReport.Status.PENDING,
+            file_name="transaction-report-pending.pdf",
+        )
+
+        response = self.client.get(
+            reverse("transaction-report-download", kwargs={"pk": report.id})
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            response.data["detail"],
+            "Transaction report is not ready for download.",
+        )
 
     @override_settings(
         TRANSACTION_2FA_CHALLENGE_AMOUNT=Decimal("30.00"),
@@ -648,7 +907,52 @@ class TransactionApiTests(APITestCase):
         self.assertEqual(response.data["id"], transaction.id)
         self.assertEqual(response.data["status"], Transaction.Status.PENDING)
 
-    @patch("apps.transactions.api.views.list_user_transactions")
+    def test_transaction_status_endpoint_with_pending_2fa_challenge(self):
+        """Status endpoint should return pending challenge state without crashing."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBA00000000000000000000000000061",
+            currency=Account.Currency.USD,
+            balance=Decimal("100.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBB00000000000000000000000000062",
+            currency=Account.Currency.USD,
+            balance=Decimal("10.00"),
+        )
+        transaction = Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=from_account,
+            to_account=to_account,
+            idempotency_key="status-view-2fa-1",
+            request_fingerprint="fingerprint-status-view-2fa-1",
+            amount=Decimal("25.00"),
+            status=Transaction.Status.PENDING,
+        )
+        TransactionChallenge.objects.create(
+            user=self.user,
+            transaction=transaction,
+            status=TransactionChallenge.Status.PENDING,
+            code_hash="hash",
+            reason_codes="large_amount",
+            expires_at=timezone.now() + timedelta(minutes=5),
+        )
+
+        response = self.client.get(
+            reverse("transaction-status", kwargs={"pk": transaction.id})
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], transaction.id)
+        self.assertTrue(response.data["requires_2fa"])
+        self.assertEqual(
+            response.data["challenge"]["status"],
+            TransactionChallenge.Status.PENDING,
+        )
+
+    @patch("apps.transactions.api.views.transactions.list_user_transactions")
     def test_transaction_status_endpoint_forces_primary_read(
         self,
         mock_list_user_transactions,

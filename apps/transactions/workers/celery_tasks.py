@@ -8,6 +8,7 @@ from apps.transactions.application import (
     get_due_swift_transaction_ids,
     get_stuck_transaction_ids,
     mark_transaction_batch_failed,
+    process_transaction_report,
     publish_pending_transaction_outbox,
     process_transaction_batch,
     process_transfer,
@@ -200,6 +201,34 @@ def process_swift_transfer_task(
     finally:
         reset_task_id(task_token)
         reset_correlation_id(correlation_token)
+
+
+@shared_task(bind=True)
+def generate_transaction_report_task(self, report_id: int) -> None:
+    """Generate one transaction PDF report."""
+
+    task_token = set_task_id(self.request.id)
+    try:
+        log_event(
+            logger,
+            logging.INFO,
+            "transaction.report_task_started",
+            message="Transaction report generation task started.",
+            report_id=report_id,
+            task_id=self.request.id,
+        )
+        report = process_transaction_report(report_id=report_id)
+        log_event(
+            logger,
+            logging.INFO,
+            "transaction.report_task_finished",
+            message="Transaction report generation task finished.",
+            report_id=report_id,
+            task_id=self.request.id,
+            status=report.status,
+        )
+    finally:
+        reset_task_id(task_token)
 
 
 @shared_task(bind=True)

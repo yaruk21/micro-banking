@@ -20,6 +20,7 @@ from .outbox import (
 )
 from .process import process_transfer
 from .recovery import get_stuck_transaction_ids
+from .reporting import create_transaction_report, process_transaction_report
 from .swift import get_due_swift_transaction_ids, process_swift_transfer
 from .types import (
     BatchTransferItemInput,
@@ -43,6 +44,7 @@ __all__ = [
     "create_transaction_batch",
     "create_swift_transfer",
     "create_transfer",
+    "create_transaction_report",
     "get_due_swift_transaction_ids",
     "get_stuck_transaction_ids",
     "get_pending_transaction_outbox_ids",
@@ -50,6 +52,7 @@ __all__ = [
     "publish_pending_transaction_outbox",
     "publish_transaction_outbox",
     "process_transaction_batch",
+    "process_transaction_report",
     "process_transfer",
     "process_swift_transfer",
 ]

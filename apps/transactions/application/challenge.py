@@ -101,7 +101,6 @@ def confirm_transaction_challenge(
     with db_transaction.atomic():
         transaction = (
             Transaction.objects.select_for_update()
-            .select_related("from_account", "to_account", "challenge")
             .filter(id=transaction_id)
             .first()
         )
@@ -113,12 +112,15 @@ def confirm_transaction_challenge(
                 "You can confirm 2FA only for your own transactions."
             )
 
-        try:
-            challenge = transaction.challenge
-        except TransactionChallenge.DoesNotExist as exc:
+        challenge = (
+            TransactionChallenge.objects.select_for_update()
+            .filter(transaction_id=transaction.id)
+            .first()
+        )
+        if challenge is None:
             raise TransactionValidationError(
                 "Transaction does not require 2FA confirmation."
-            ) from exc
+            )
 
         if challenge.status == TransactionChallenge.Status.VERIFIED:
             return transaction
@@ -207,16 +209,18 @@ def sync_transaction_challenge_state(*, transaction: Transaction) -> Transaction
     with db_transaction.atomic():
         locked_transaction = (
             Transaction.objects.select_for_update()
-            .select_related("challenge")
             .filter(id=transaction.id)
             .first()
         )
         if locked_transaction is None:
             return transaction
 
-        try:
-            locked_challenge = locked_transaction.challenge
-        except TransactionChallenge.DoesNotExist:
+        locked_challenge = (
+            TransactionChallenge.objects.select_for_update()
+            .filter(transaction_id=locked_transaction.id)
+            .first()
+        )
+        if locked_challenge is None:
             return locked_transaction
 
         previous_status = locked_challenge.status

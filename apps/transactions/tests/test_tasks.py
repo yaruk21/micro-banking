@@ -5,6 +5,7 @@ from django.test import TestCase, override_settings
 from apps.transactions.tasks import (
     dispatch_due_swift_transfers_task,
     ensure_transaction_partitions_task,
+    generate_transaction_report_task,
     process_swift_transfer_task,
 )
 
@@ -64,3 +65,23 @@ class SwiftTransferTaskTests(TestCase):
         process_swift_transfer_task(transaction_id=17, correlation_id="corr-17")
 
         mock_process.assert_called_once_with(transaction_id=17)
+
+
+class TransactionReportTaskTests(TestCase):
+    """Test background transaction report task behavior."""
+
+    @patch("apps.transactions.workers.celery_tasks.process_transaction_report")
+    def test_generate_transaction_report_task_calls_service(self, mock_process):
+        """Report worker task should delegate to the PDF generation service."""
+
+        mock_process.return_value = type(
+            "ReportResult",
+            (),
+            {
+                "status": "completed",
+            },
+        )()
+
+        generate_transaction_report_task(report_id=23)
+
+        mock_process.assert_called_once_with(report_id=23)

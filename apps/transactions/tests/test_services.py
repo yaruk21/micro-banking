@@ -15,6 +15,7 @@ from apps.transactions.application import (
     SwiftTransferInput,
     TransferInput,
     confirm_transaction_challenge,
+    create_transaction_report,
     TransactionFraudBlockedError,
     TransactionLimitExceededError,
     TransactionPermissionError,
@@ -23,6 +24,7 @@ from apps.transactions.application import (
     create_transfer,
     get_due_swift_transaction_ids,
     get_stuck_transaction_ids,
+    process_transaction_report,
     process_transfer,
     process_swift_transfer,
 )
@@ -33,6 +35,7 @@ from apps.transactions.models import (
     TransactionChallenge,
     TransactionIdempotencyKey,
     TransactionOutbox,
+    TransactionReport,
 )
 from apps.transactions.workers.celery_tasks import recover_stuck_transfers_task
 
@@ -1308,3 +1311,69 @@ class SwiftTransferServiceTests(TestCase):
         challenge.save(update_fields=["status", "verified_at", "updated_at"])
 
         self.assertEqual(get_due_swift_transaction_ids(limit=10), [transfer.id])
+
+
+class TransactionReportServiceTests(TestCase):
+    """Validate asynchronous transaction PDF report generation services."""
+
+    def setUp(self):
+        """Create baseline users and accounts for report generation."""
+
+        cache.clear()
+        self.user = User.objects.create_user(
+            username="report-alice",
+            password="pass123",
+        )
+        self.other_user = User.objects.create_user(
+            username="report-bob",
+            password="pass123",
+        )
+
+    @patch("apps.transactions.application.reporting._dispatch_transaction_report")
+    def test_process_transaction_report_generates_completed_pdf(
+        self,
+        mock_dispatch_report,
+    ):
+        """Processing a pending report should persist a completed PDF payload."""
+
+        from_account = Account.objects.create(
+            owner=self.user,
+            iban="MBR00000000000000000000000000011",
+            currency=Account.Currency.USD,
+            balance=Decimal("150.00"),
+        )
+        to_account = Account.objects.create(
+            owner=self.other_user,
+            iban="MBR00000000000000000000000000012",
+            currency=Account.Currency.USD,
+            balance=Decimal("20.00"),
+        )
+        transaction = Transaction.objects.create(
+            initiated_by=self.user,
+            from_account=from_account,
+            to_account=to_account,
+            idempotency_key="report-service-1",
+            request_fingerprint="report-service-1",
+            amount=Decimal("25.00"),
+            credited_amount=Decimal("25.00"),
+            status=Transaction.Status.COMPLETED,
+        )
+        Transaction.objects.filter(id=transaction.id).update(
+            created_at="2026-05-05T10:00:00Z"
+        )
+
+        report = create_transaction_report(
+            user=self.user,
+            date_from=timezone.datetime(2026, 5, 5).date(),
+            date_to=timezone.datetime(2026, 5, 5).date(),
+        )
+        generated_report = process_transaction_report(report_id=report.id)
+
+        report.refresh_from_db()
+
+        self.assertEqual(report.status, TransactionReport.Status.COMPLETED)
+        self.assertEqual(generated_report.status, TransactionReport.Status.COMPLETED)
+        self.assertEqual(report.content_type, "application/pdf")
+        self.assertTrue(report.file_name.endswith(".pdf"))
+        self.assertTrue(report.pdf_content.startswith(b"%PDF-1.4"))
+        mock_dispatch_report.assert_not_called()

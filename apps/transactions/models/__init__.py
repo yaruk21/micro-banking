@@ -1,6 +1,7 @@
 from .async_support import TransactionIdempotencyKey, TransactionOutbox
 from .batch import TransactionBatch, TransactionBatchItem
 from .fraud import FraudEvent, TransactionChallenge
+from .reporting import TransactionReport
 from .swift import (
     COUNTRY_CODE_VALIDATOR,
     IBAN_VALIDATOR,
@@ -21,4 +22,5 @@ __all__ = [
     "TransactionChallenge",
     "TransactionIdempotencyKey",
     "TransactionOutbox",
+    "TransactionReport",
 ]

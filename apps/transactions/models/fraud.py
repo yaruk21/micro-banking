@@ -118,6 +118,7 @@ class TransactionChallenge(models.Model):
         "transactions.Transaction",
         on_delete=models.CASCADE,
         related_name="challenge",
+        db_constraint=False,
     )
     status = models.CharField(
         max_length=16,
