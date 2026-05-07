@@ -1,6 +1,12 @@
+from urllib.parse import urlencode
+
 from rest_framework import serializers
 from rest_framework.reverse import reverse
 
+from apps.transactions.application.reporting import (
+    build_transaction_report_download_token,
+    report_has_downloadable_artifact,
+)
 from apps.transactions.models import TransactionReport
 
 
@@ -46,14 +52,19 @@ class TransactionReportReadSerializer(serializers.ModelSerializer):
     def get_download_url(self, obj: TransactionReport):
         """Return the report download URL only when the PDF is ready."""
 
-        if obj.status != TransactionReport.Status.COMPLETED or not obj.pdf_content:
+        if (
+            obj.status != TransactionReport.Status.COMPLETED
+            or not report_has_downloadable_artifact(report=obj)
+        ):
             return None
 
         request = self.context.get("request")
         if request is None:
             return None
-        return reverse(
+        download_url = reverse(
             "transaction-report-download",
             kwargs={"pk": obj.id},
             request=request,
         )
+        token = build_transaction_report_download_token(report=obj)
+        return f"{download_url}?{urlencode({'token': token})}"

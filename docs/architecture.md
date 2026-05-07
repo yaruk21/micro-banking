@@ -16,6 +16,25 @@ The codebase is split into:
 - `apps/transactions`: transaction submission, idempotency, async processing, and status tracking
 - `core`: framework settings, cache helpers, URL routing, and Celery bootstrap
 
+## Reporting Flow
+
+Transaction PDF reporting is asynchronous and follows the same "accept first, process in background" model as transfers:
+
+- `POST /api/transactions/reports/` stores a `TransactionReport` row in `pending` status
+- `celery_worker` generates the PDF, writes it to the configured `transaction_reports` storage, and updates the row to `completed`
+- `GET /api/transactions/reports/{id}/` returns current status metadata plus a temporary signed `download_url` when the file is ready
+- `GET /api/transactions/reports/{id}/download/` validates the signed token and streams the stored PDF file
+
+Storage notes for reporting:
+
+- the current default backend is Django `FileSystemStorage`
+- production can switch `transaction_reports` to `core.storage_backends.S3PresignedReportStorage`
+- generated PDFs are stored under `/app/media/transaction-reports/...` unless overridden by env
+- `storage_key` is the source of truth for new generated reports
+- `pdf_content` remains as a legacy fallback so older inline-stored reports still download
+- in the EC2 Compose topology, `web` and `celery_worker` must share the same `/app/media` volume, otherwise reports can finish as `completed` in PostgreSQL while download still fails with `409 Transaction report file is unavailable.`
+- for cloud-backed storage, `/download/` can redirect to a temporary pre-signed object URL while keeping the public API shape unchanged
+
 PostgreSQL-specific storage notes:
 
 - `transactions_transaction` is range-partitioned by `created_at` into monthly partitions plus a `DEFAULT` partition.
@@ -98,6 +117,7 @@ Flow:
 - `web`, `celery_worker`, and `celery_beat` use the pooled PostgreSQL endpoint exposed by `pgbouncer`
 - `web` only handles collectstatic, optional admin bootstrap, and Gunicorn startup
 - PgBouncer can sit in front of the primary and optional replica for app traffic, while the migrate/release step should keep using the direct primary endpoint
+- `web` and `celery_worker` share the `transaction_report_media` Docker volume so generated PDF report files are visible to both services
 
 ## Known Architectural Limits
 

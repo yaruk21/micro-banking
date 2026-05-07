@@ -11,6 +11,7 @@ from apps.accounts.services import get_or_create_system_account
 from apps.transactions.models import SwiftTransferDetails, Transaction, TransactionChallenge
 from apps.transactions.realtime import publish_transaction_status_update
 from core.cache_utils import bump_user_cache_version
+from core.metrics import record_transaction_result
 from core.structured_logging import log_event
 
 from .exceptions import TransactionValidationError
@@ -186,6 +187,12 @@ def process_swift_transfer(*, transaction_id: int) -> Transaction:
         user_id=locked_from_account.owner_id,
     )
     publish_transaction_status_update(transaction_id=transfer.id)
+    record_transaction_result(
+        transfer_type=transfer.transfer_type,
+        status=transfer.status,
+        amount=transfer.amount,
+        duration_seconds=_processing_duration_seconds(transfer=transfer),
+    )
     return transfer
 
 
@@ -215,4 +222,21 @@ def _fail_swift_transfer(*, transfer: Transaction, reason: str) -> Transaction:
         user_id=transfer.initiated_by_id,
     )
     publish_transaction_status_update(transaction_id=transfer.id)
+    record_transaction_result(
+        transfer_type=transfer.transfer_type,
+        status=transfer.status,
+        amount=transfer.amount,
+        duration_seconds=_processing_duration_seconds(transfer=transfer),
+    )
     return transfer
+
+
+def _processing_duration_seconds(*, transfer: Transaction) -> float:
+    """Return SWIFT processing duration from the recorded processing start time."""
+
+    if transfer.processing_started_at is None or transfer.completed_at is None:
+        return 0.0
+    return max(
+        (transfer.completed_at - transfer.processing_started_at).total_seconds(),
+        0.0,
+    )

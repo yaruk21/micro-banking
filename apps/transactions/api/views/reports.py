@@ -1,11 +1,19 @@
-from django.http import HttpResponse
+from django.http import FileResponse, HttpResponse
+from django.shortcuts import redirect
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import generics, status
 from rest_framework.exceptions import NotFound
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
 from apps.transactions.application import create_transaction_report
+from apps.transactions.application.reporting import (
+    build_transaction_report_storage_download_url,
+    open_transaction_report_file,
+    report_has_downloadable_artifact,
+    validate_transaction_report_download_token,
+)
 from apps.transactions.models import TransactionReport
 
 from ..serializers.reports import (
@@ -77,6 +85,7 @@ class TransactionReportStatusView(generics.GenericAPIView):
 class TransactionReportDownloadView(generics.GenericAPIView):
     """Handle completed transaction PDF report downloads."""
 
+    permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "transactions_read"
 
@@ -96,14 +105,37 @@ class TransactionReportDownloadView(generics.GenericAPIView):
     def get(self, request, *args, **kwargs):
         """Download one completed PDF report."""
 
-        report = get_user_transaction_report_or_404(
-            user=request.user,
+        report = get_authorized_transaction_report_or_404(
+            request=request,
             report_id=kwargs["pk"],
         )
-        if report.status != TransactionReport.Status.COMPLETED or not report.pdf_content:
+        if (
+            report.status != TransactionReport.Status.COMPLETED
+            or not report_has_downloadable_artifact(report=report)
+        ):
             return Response(
                 {"detail": "Transaction report is not ready for download."},
                 status=status.HTTP_409_CONFLICT,
+            )
+
+        if report.storage_key:
+            storage_download_url = build_transaction_report_storage_download_url(
+                report=report
+            )
+            if storage_download_url:
+                return redirect(storage_download_url)
+            try:
+                report_file = open_transaction_report_file(report=report)
+            except OSError:
+                return Response(
+                    {"detail": "Transaction report file is unavailable."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            return FileResponse(
+                report_file,
+                as_attachment=True,
+                filename=report.file_name or f"transaction-report-{report.id}.pdf",
+                content_type=report.content_type or "application/pdf",
             )
 
         response = HttpResponse(
@@ -123,3 +155,21 @@ def get_user_transaction_report_or_404(*, user, report_id: int) -> TransactionRe
     if report is None:
         raise NotFound("Transaction report not found.")
     return report
+
+
+def get_authorized_transaction_report_or_404(*, request, report_id: int) -> TransactionReport:
+    """Return one report when the current user or a signed token is authorized."""
+
+    user = request.user
+    if user.is_authenticated:
+        report = TransactionReport.objects.filter(id=report_id, user=user).first()
+        if report is not None:
+            return report
+
+    token = request.query_params.get("token", "")
+    if validate_transaction_report_download_token(report_id=report_id, token=token):
+        report = TransactionReport.objects.filter(id=report_id).first()
+        if report is not None:
+            return report
+
+    raise NotFound("Transaction report not found.")

@@ -32,6 +32,7 @@ class TransactionReport(models.Model):
         blank=True,
         default="application/pdf",
     )
+    storage_key = models.CharField(max_length=500, blank=True)
     pdf_content = models.BinaryField(null=True, blank=True)
     failure_reason = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)

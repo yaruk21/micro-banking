@@ -78,6 +78,8 @@ services:
         condition: service_completed_successfully
     ports:
       - "80:8000"
+    volumes:
+      - transaction_report_media:/app/media
 
   celery_worker:
     build: .
@@ -99,6 +101,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - transaction_report_media:/app/media
 
   celery_beat:
     build: .
@@ -123,3 +127,4 @@ services:
 
 volumes:
   postgres_data:
+  transaction_report_media:

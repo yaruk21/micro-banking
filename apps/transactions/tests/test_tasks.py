@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 
+from core.metrics import reset_metrics
 from apps.transactions.tasks import (
     dispatch_due_swift_transfers_task,
     ensure_transaction_partitions_task,
@@ -12,6 +13,9 @@ from apps.transactions.tasks import (
 
 class TransactionPartitionTaskTests(TestCase):
     """Test transaction partition maintenance task behavior."""
+
+    def setUp(self):
+        reset_metrics()
 
     @override_settings(TRANSACTION_PARTITION_MONTHS_AHEAD=4)
     @patch("apps.transactions.workers.celery_tasks.ensure_transaction_partitions")
@@ -28,6 +32,9 @@ class TransactionPartitionTaskTests(TestCase):
 
 class SwiftTransferTaskTests(TestCase):
     """Test delayed SWIFT pickup and processing task behavior."""
+
+    def setUp(self):
+        reset_metrics()
 
     @override_settings(SWIFT_TRANSFER_PICKUP_BATCH_SIZE=3)
     @patch("apps.transactions.workers.celery_tasks.process_swift_transfer_task.delay")
@@ -69,6 +76,9 @@ class SwiftTransferTaskTests(TestCase):
 
 class TransactionReportTaskTests(TestCase):
     """Test background transaction report task behavior."""
+
+    def setUp(self):
+        reset_metrics()
 
     @patch("apps.transactions.workers.celery_tasks.process_transaction_report")
     def test_generate_transaction_report_task_calls_service(self, mock_process):

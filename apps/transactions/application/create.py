@@ -13,6 +13,7 @@ from apps.transactions.models import (
 )
 from apps.transactions.realtime import publish_transaction_status_update
 from core.cache_utils import bump_user_cache_version
+from core.metrics import record_transaction_request
 from core.structured_logging import log_event
 
 from .cache_versions import bump_pending_transaction_caches
@@ -105,6 +106,10 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
             )
             raise
         _log_replayed_transaction(existing_transfer)
+        record_transaction_request(
+            transfer_type=Transaction.TransferType.INTERNAL,
+            outcome="replayed",
+        )
         return existing_transfer, False
 
     fraud_event, fraud_decision = create_transaction_attempt_event(
@@ -205,6 +210,10 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
             transaction=existing_transfer,
         )
         _log_replayed_transaction(existing_transfer)
+        record_transaction_request(
+            transfer_type=Transaction.TransferType.INTERNAL,
+            outcome="replayed",
+        )
         return existing_transfer, False
 
     log_event(
@@ -226,6 +235,10 @@ def create_transfer(*, transfer_input: TransferInput) -> tuple[Transaction, bool
         to_account=to_account,
     )
     publish_transaction_status_update(transaction_id=transfer.id)
+    record_transaction_request(
+        transfer_type=Transaction.TransferType.INTERNAL,
+        outcome="accepted",
+    )
     return transfer, True
 
 
@@ -293,6 +306,10 @@ def create_swift_transfer(
             )
             raise
         _log_replayed_transaction(existing_transfer)
+        record_transaction_request(
+            transfer_type=Transaction.TransferType.SWIFT,
+            outcome="replayed",
+        )
         return existing_transfer, False
 
     fraud_event, fraud_decision = create_transaction_attempt_event(
@@ -405,6 +422,10 @@ def create_swift_transfer(
             transaction=existing_transfer,
         )
         _log_replayed_transaction(existing_transfer)
+        record_transaction_request(
+            transfer_type=Transaction.TransferType.SWIFT,
+            outcome="replayed",
+        )
         return existing_transfer, False
 
     log_event(
@@ -428,6 +449,10 @@ def create_swift_transfer(
         user_id=from_account.owner_id,
     )
     publish_transaction_status_update(transaction_id=transfer.id)
+    record_transaction_request(
+        transfer_type=Transaction.TransferType.SWIFT,
+        outcome="accepted",
+    )
     return transfer, True
 
 

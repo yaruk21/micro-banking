@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional
 
 from celery import shared_task
@@ -21,6 +22,7 @@ from core.logging_context import (
     set_correlation_id,
     set_task_id,
 )
+from core.metrics import record_task_result
 from core.structured_logging import log_event
 
 logger = logging.getLogger("apps.transactions")
@@ -30,6 +32,7 @@ logger = logging.getLogger("apps.transactions")
 def publish_pending_transaction_outbox_task(self, limit: Optional[int] = None) -> int:
     """Publish pending transaction outbox task."""
     task_token = set_task_id(self.request.id)
+    started_at = time.monotonic()
     try:
         published_count = publish_pending_transaction_outbox(
             limit=limit or settings.TRANSACTION_OUTBOX_PUBLISH_BATCH_SIZE
@@ -43,7 +46,19 @@ def publish_pending_transaction_outbox_task(self, limit: Optional[int] = None) -
                 count=published_count,
                 task_id=self.request.id,
             )
+        record_task_result(
+            task_name="publish_pending_transaction_outbox",
+            status="completed",
+            duration_seconds=time.monotonic() - started_at,
+        )
         return published_count
+    except Exception:
+        record_task_result(
+            task_name="publish_pending_transaction_outbox",
+            status="failed",
+            duration_seconds=time.monotonic() - started_at,
+        )
+        raise
     finally:
         reset_task_id(task_token)
 
@@ -52,6 +67,7 @@ def publish_pending_transaction_outbox_task(self, limit: Optional[int] = None) -
 def dispatch_due_swift_transfers_task(self, limit: Optional[int] = None) -> int:
     """Dispatch due SWIFT transfers to the dedicated processing task."""
     task_token = set_task_id(self.request.id)
+    started_at = time.monotonic()
     try:
         transaction_ids = get_due_swift_transaction_ids(
             limit=limit or settings.SWIFT_TRANSFER_PICKUP_BATCH_SIZE
@@ -72,7 +88,19 @@ def dispatch_due_swift_transfers_task(self, limit: Optional[int] = None) -> int:
                 count=len(transaction_ids),
                 task_id=self.request.id,
             )
+        record_task_result(
+            task_name="dispatch_due_swift_transfers",
+            status="completed",
+            duration_seconds=time.monotonic() - started_at,
+        )
         return len(transaction_ids)
+    except Exception:
+        record_task_result(
+            task_name="dispatch_due_swift_transfers",
+            status="failed",
+            duration_seconds=time.monotonic() - started_at,
+        )
+        raise
     finally:
         reset_task_id(task_token)
 
@@ -90,6 +118,7 @@ def dispatch_due_swift_transfers_task(self, limit: Optional[int] = None) -> int:
 def process_transaction_batch_task(self, batch_id: int) -> None:
     """Process transaction batch task."""
     task_token = set_task_id(self.request.id)
+    started_at = time.monotonic()
     try:
         log_event(
             logger,
@@ -110,8 +139,18 @@ def process_transaction_batch_task(self, batch_id: int) -> None:
             succeeded_items=batch.succeeded_items,
             failed_items=batch.failed_items,
         )
+        record_task_result(
+            task_name="process_transaction_batch",
+            status="completed",
+            duration_seconds=time.monotonic() - started_at,
+        )
     except Exception as exc:
         mark_transaction_batch_failed(batch_id=batch_id, reason=str(exc))
+        record_task_result(
+            task_name="process_transaction_batch",
+            status="failed",
+            duration_seconds=time.monotonic() - started_at,
+        )
         raise
     finally:
         reset_task_id(task_token)
@@ -135,6 +174,7 @@ def process_transfer_task(
     """Process transfer task."""
     correlation_token = set_correlation_id(correlation_id)
     task_token = set_task_id(self.request.id)
+    started_at = time.monotonic()
     try:
         log_event(
             logger,
@@ -155,6 +195,18 @@ def process_transfer_task(
             status=transfer.status,
             idempotency_key=transfer.idempotency_key,
         )
+        record_task_result(
+            task_name="process_transfer",
+            status="completed",
+            duration_seconds=time.monotonic() - started_at,
+        )
+    except Exception:
+        record_task_result(
+            task_name="process_transfer",
+            status="failed",
+            duration_seconds=time.monotonic() - started_at,
+        )
+        raise
     finally:
         reset_task_id(task_token)
         reset_correlation_id(correlation_token)
@@ -178,6 +230,7 @@ def process_swift_transfer_task(
     """Process one due SWIFT transfer."""
     correlation_token = set_correlation_id(correlation_id)
     task_token = set_task_id(self.request.id)
+    started_at = time.monotonic()
     try:
         log_event(
             logger,
@@ -198,6 +251,18 @@ def process_swift_transfer_task(
             status=transfer.status,
             idempotency_key=transfer.idempotency_key,
         )
+        record_task_result(
+            task_name="process_swift_transfer",
+            status="completed",
+            duration_seconds=time.monotonic() - started_at,
+        )
+    except Exception:
+        record_task_result(
+            task_name="process_swift_transfer",
+            status="failed",
+            duration_seconds=time.monotonic() - started_at,
+        )
+        raise
     finally:
         reset_task_id(task_token)
         reset_correlation_id(correlation_token)
@@ -208,6 +273,7 @@ def generate_transaction_report_task(self, report_id: int) -> None:
     """Generate one transaction PDF report."""
 
     task_token = set_task_id(self.request.id)
+    started_at = time.monotonic()
     try:
         log_event(
             logger,
@@ -227,6 +293,18 @@ def generate_transaction_report_task(self, report_id: int) -> None:
             task_id=self.request.id,
             status=report.status,
         )
+        record_task_result(
+            task_name="generate_transaction_report",
+            status="completed",
+            duration_seconds=time.monotonic() - started_at,
+        )
+    except Exception:
+        record_task_result(
+            task_name="generate_transaction_report",
+            status="failed",
+            duration_seconds=time.monotonic() - started_at,
+        )
+        raise
     finally:
         reset_task_id(task_token)
 
@@ -238,6 +316,7 @@ def recover_stuck_transfers_task(self) -> int:
     transaction_ids = get_stuck_transaction_ids(
         threshold_seconds=settings.TRANSACTION_STUCK_THRESHOLD_SECONDS
     )
+    started_at = time.monotonic()
     try:
         for transaction_id in transaction_ids:
             process_transfer_task.delay(transaction_id, correlation_id=self.request.id)
@@ -252,7 +331,19 @@ def recover_stuck_transfers_task(self) -> int:
                 count=len(transaction_ids),
                 task_id=self.request.id,
             )
+        record_task_result(
+            task_name="recover_stuck_transfers",
+            status="completed",
+            duration_seconds=time.monotonic() - started_at,
+        )
         return len(transaction_ids)
+    except Exception:
+        record_task_result(
+            task_name="recover_stuck_transfers",
+            status="failed",
+            duration_seconds=time.monotonic() - started_at,
+        )
+        raise
     finally:
         reset_task_id(task_token)
 
@@ -261,6 +352,7 @@ def recover_stuck_transfers_task(self) -> int:
 def ensure_transaction_partitions_task(self) -> int:
     """Ensure future monthly transaction partitions exist."""
     task_token = set_task_id(self.request.id)
+    started_at = time.monotonic()
     try:
         created_count = ensure_transaction_partitions(
             months_ahead=settings.TRANSACTION_PARTITION_MONTHS_AHEAD
@@ -274,6 +366,18 @@ def ensure_transaction_partitions_task(self) -> int:
             months_ahead=settings.TRANSACTION_PARTITION_MONTHS_AHEAD,
             task_id=self.request.id,
         )
+        record_task_result(
+            task_name="ensure_transaction_partitions",
+            status="completed",
+            duration_seconds=time.monotonic() - started_at,
+        )
         return created_count
+    except Exception:
+        record_task_result(
+            task_name="ensure_transaction_partitions",
+            status="failed",
+            duration_seconds=time.monotonic() - started_at,
+        )
+        raise
     finally:
         reset_task_id(task_token)

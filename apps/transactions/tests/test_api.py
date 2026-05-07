@@ -1,9 +1,15 @@
+import shutil
+import tempfile
 from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.core.cache import cache
+from django.core.files.base import ContentFile
+from django.core.files.storage import storages
 from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -27,11 +33,57 @@ from apps.transactions.selectors import list_user_transactions
 User = get_user_model()
 
 
+class FakeCloudReportStorage:
+    """In-memory storage with presigned-like URL support for report tests."""
+
+    def __init__(self, **kwargs):
+        self.files = {}
+
+    def save(self, name, content):
+        content.open("rb")
+        self.files[name] = content.read()
+        return name
+
+    def open(self, name, mode="rb"):
+        if name not in self.files:
+            raise OSError("missing object")
+        from io import BytesIO
+
+        return BytesIO(self.files[name])
+
+    def exists(self, name):
+        return name in self.files
+
+    def delete(self, name):
+        self.files.pop(name, None)
+
+    def url(self, name, parameters=None, expire=None):
+        return f"https://reports.example.test/{name}?expires={expire or 0}"
+
+
 class TransactionApiTests(APITestCase):
     """Test transaction api test behavior."""
     def setUp(self):
         """Handle set up."""
         cache.clear()
+        self.report_storage_dir = tempfile.mkdtemp()
+        report_storage_override = override_settings(
+            STORAGES={
+                **settings.STORAGES,
+                "transaction_reports": {
+                    "BACKEND": "django.core.files.storage.FileSystemStorage",
+                    "OPTIONS": {
+                        "location": self.report_storage_dir,
+                        "base_url": "/media/transaction-reports/",
+                    },
+                },
+            }
+        )
+        report_storage_override.enable()
+        storages._storages.clear()
+        self.addCleanup(report_storage_override.disable)
+        self.addCleanup(storages._storages.clear)
+        self.addCleanup(shutil.rmtree, self.report_storage_dir, ignore_errors=True)
         self.user = User.objects.create_user(username="alice", password="testpass123")
         self.other_user = User.objects.create_user(username="bob", password="testpass123")
         self.client.force_authenticate(user=self.user)
@@ -380,7 +432,12 @@ class TransactionApiTests(APITestCase):
         mock_dispatch_report.assert_called_once_with(report_id=report.id)
 
     def test_transaction_report_status_and_download_endpoints(self):
-        """Completed reports should expose status metadata and downloadable PDF content."""
+        """Completed reports should expose a temporary link and downloadable stored PDF."""
+
+        storage_key = storages["transaction_reports"].save(
+            "user-1/report-1/transaction-report-test.pdf",
+            ContentFile(b"%PDF-1.4\nreport\n"),
+        )
 
         report = TransactionReport.objects.create(
             user=self.user,
@@ -388,27 +445,94 @@ class TransactionApiTests(APITestCase):
             date_to=timezone.datetime(2026, 5, 7).date(),
             status=TransactionReport.Status.COMPLETED,
             file_name="transaction-report-test.pdf",
-            pdf_content=b"%PDF-1.4\nreport\n",
+            storage_key=storage_key,
             completed_at=timezone.now(),
         )
 
         status_response = self.client.get(
             reverse("transaction-report-status", kwargs={"pk": report.id})
         )
-        download_response = self.client.get(
-            reverse("transaction-report-download", kwargs={"pk": report.id})
-        )
 
         self.assertEqual(status_response.status_code, status.HTTP_200_OK)
         self.assertEqual(status_response.data["status"], TransactionReport.Status.COMPLETED)
         self.assertIn("/api/transactions/reports/", status_response.data["download_url"])
+        self.assertIn("token=", status_response.data["download_url"])
+
+        download_url = urlsplit(status_response.data["download_url"])
+        self.client.force_authenticate(user=None)
+        download_response = self.client.get(
+            f"{download_url.path}?{download_url.query}"
+        )
+
         self.assertEqual(download_response.status_code, status.HTTP_200_OK)
         self.assertEqual(download_response["Content-Type"], "application/pdf")
         self.assertIn(
             'attachment; filename="transaction-report-test.pdf"',
             download_response["Content-Disposition"],
         )
-        self.assertEqual(download_response.content, b"%PDF-1.4\nreport\n")
+        self.assertEqual(
+            b"".join(download_response.streaming_content),
+            b"%PDF-1.4\nreport\n",
+        )
+
+    def test_transaction_report_download_endpoint_keeps_legacy_inline_pdf_support(self):
+        """Legacy inline PDF payloads should stay downloadable for the owner."""
+
+        report = TransactionReport.objects.create(
+            user=self.user,
+            date_from=timezone.datetime(2026, 5, 1).date(),
+            date_to=timezone.datetime(2026, 5, 7).date(),
+            status=TransactionReport.Status.COMPLETED,
+            file_name="transaction-report-legacy.pdf",
+            pdf_content=b"%PDF-1.4\nlegacy-report\n",
+            completed_at=timezone.now(),
+        )
+
+        response = self.client.get(
+            reverse("transaction-report-download", kwargs={"pk": report.id})
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.content, b"%PDF-1.4\nlegacy-report\n")
+
+    @override_settings(
+        STORAGES={
+            **settings.STORAGES,
+            "transaction_reports": {
+                "BACKEND": "apps.transactions.tests.test_api.FakeCloudReportStorage",
+            },
+        }
+    )
+    def test_transaction_report_download_endpoint_redirects_to_cloud_storage_url(self):
+        """Cloud-backed report downloads should redirect to a temporary storage URL."""
+
+        storages._storages.clear()
+        storage_key = storages["transaction_reports"].save(
+            "user-1/report-9/transaction-report-cloud.pdf",
+            ContentFile(b"%PDF-1.4\ncloud-report\n"),
+        )
+        report = TransactionReport.objects.create(
+            user=self.user,
+            date_from=timezone.datetime(2026, 5, 1).date(),
+            date_to=timezone.datetime(2026, 5, 7).date(),
+            status=TransactionReport.Status.COMPLETED,
+            file_name="transaction-report-cloud.pdf",
+            storage_key=storage_key,
+            completed_at=timezone.now(),
+        )
+
+        status_response = self.client.get(
+            reverse("transaction-report-status", kwargs={"pk": report.id})
+        )
+        download_url = urlsplit(status_response.data["download_url"])
+        self.client.force_authenticate(user=None)
+        response = self.client.get(
+            f"{download_url.path}?{download_url.query}",
+            follow=False,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertIn("https://reports.example.test/", response["Location"])
 
     def test_transaction_report_download_endpoint_returns_conflict_while_pending(self):
         """Pending reports should not be downloadable yet."""

@@ -70,6 +70,7 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "core.structured_logging.RequestIdMiddleware",
+    "core.metrics_middleware.MetricsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -161,7 +162,61 @@ USE_TZ = True
 # Static files
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
+TRANSACTION_REPORT_STORAGE_BACKEND = os.getenv(
+    "TRANSACTION_REPORT_STORAGE_BACKEND",
+    "django.core.files.storage.FileSystemStorage",
+)
+TRANSACTION_REPORT_S3_BUCKET_NAME = os.getenv(
+    "TRANSACTION_REPORT_S3_BUCKET_NAME",
+    "",
+).strip()
+TRANSACTION_REPORT_S3_REGION_NAME = os.getenv(
+    "TRANSACTION_REPORT_S3_REGION_NAME",
+    "",
+).strip()
+TRANSACTION_REPORT_S3_ENDPOINT_URL = os.getenv(
+    "TRANSACTION_REPORT_S3_ENDPOINT_URL",
+    "",
+).strip()
+TRANSACTION_REPORT_S3_ACCESS_KEY_ID = os.getenv(
+    "TRANSACTION_REPORT_S3_ACCESS_KEY_ID",
+    "",
+).strip()
+TRANSACTION_REPORT_S3_SECRET_ACCESS_KEY = os.getenv(
+    "TRANSACTION_REPORT_S3_SECRET_ACCESS_KEY",
+    "",
+).strip()
+TRANSACTION_REPORT_S3_ADDRESSING_STYLE = os.getenv(
+    "TRANSACTION_REPORT_S3_ADDRESSING_STYLE",
+    "",
+).strip()
+TRANSACTION_REPORT_S3_SIGNATURE_VERSION = os.getenv(
+    "TRANSACTION_REPORT_S3_SIGNATURE_VERSION",
+    "",
+).strip()
+transaction_report_storage_options = {}
+if TRANSACTION_REPORT_STORAGE_BACKEND == "django.core.files.storage.FileSystemStorage":
+    transaction_report_storage_options = {
+        "location": os.getenv(
+            "TRANSACTION_REPORT_STORAGE_LOCATION",
+            str(MEDIA_ROOT / "transaction-reports"),
+        ),
+        "base_url": os.getenv(
+            "TRANSACTION_REPORT_STORAGE_BASE_URL",
+            f"{MEDIA_URL}transaction-reports/",
+        ),
+    }
 STORAGES = {
+    "transaction_reports": {
+        "BACKEND": TRANSACTION_REPORT_STORAGE_BACKEND,
+        **(
+            {"OPTIONS": transaction_report_storage_options}
+            if transaction_report_storage_options
+            else {}
+        ),
+    },
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     }
@@ -373,6 +428,10 @@ EXCHANGE_RATE_CACHE_TIMEOUT_SECONDS = int(
 )
 TRANSACTION_STUCK_THRESHOLD_SECONDS = int(
     os.getenv("TRANSACTION_STUCK_THRESHOLD_SECONDS", "300")
+)
+TRANSACTION_REPORT_DOWNLOAD_URL_TTL_SECONDS = env_to_int(
+    "TRANSACTION_REPORT_DOWNLOAD_URL_TTL_SECONDS",
+    3600,
 )
 
 # Apply connection lifetime after database aliases are assembled.

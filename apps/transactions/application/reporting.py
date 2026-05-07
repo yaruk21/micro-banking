@@ -1,6 +1,12 @@
 import logging
+import posixpath
 from decimal import Decimal
+from typing import Optional
 
+from django.conf import settings
+from django.core import signing
+from django.core.files.base import ContentFile
+from django.core.files.storage import storages
 from django.db import transaction as db_transaction
 from django.utils import timezone
 
@@ -9,11 +15,13 @@ from apps.transactions.selectors import (
     list_user_transactions_for_period,
     summarize_user_transactions,
 )
+from core.metrics import record_transaction_report_event
 from core.structured_logging import log_event
 
 from .exceptions import TransactionValidationError
 
 logger = logging.getLogger("apps.transactions")
+REPORT_DOWNLOAD_TOKEN_SALT = "transactions.report-download"
 
 
 def create_transaction_report(*, user, date_from, date_to) -> TransactionReport:
@@ -50,6 +58,7 @@ def create_transaction_report(*, user, date_from, date_to) -> TransactionReport:
         date_to=str(report.date_to),
         status=report.status,
     )
+    record_transaction_report_event(event="requested")
     return report
 
 
@@ -66,7 +75,10 @@ def process_transaction_report(*, report_id: int) -> TransactionReport:
         if report is None:
             raise TransactionValidationError("Transaction report does not exist.")
 
-        if report.status == TransactionReport.Status.COMPLETED and report.pdf_content:
+        if (
+            report.status == TransactionReport.Status.COMPLETED
+            and report_has_downloadable_artifact(report=report)
+        ):
             return report
 
         report.status = TransactionReport.Status.PROCESSING
@@ -82,6 +94,7 @@ def process_transaction_report(*, report_id: int) -> TransactionReport:
             ]
         )
 
+    storage_key = ""
     try:
         summary = summarize_user_transactions(
             user=report.user,
@@ -103,34 +116,41 @@ def process_transaction_report(*, report_id: int) -> TransactionReport:
             summary=summary,
             transactions=transactions,
         )
+        storage_key = _store_transaction_report_pdf(
+            report=report,
+            pdf_content=pdf_content,
+        )
+
+        with db_transaction.atomic():
+            completed_report = (
+                TransactionReport.objects.select_for_update()
+                .filter(id=report.id)
+                .first()
+            )
+            if completed_report is None:
+                raise TransactionValidationError("Transaction report does not exist.")
+
+            completed_report.status = TransactionReport.Status.COMPLETED
+            completed_report.completed_at = timezone.now()
+            completed_report.failure_reason = ""
+            completed_report.content_type = "application/pdf"
+            completed_report.storage_key = storage_key
+            completed_report.pdf_content = None
+            completed_report.save(
+                update_fields=[
+                    "status",
+                    "completed_at",
+                    "failure_reason",
+                    "content_type",
+                    "storage_key",
+                    "pdf_content",
+                ]
+            )
     except Exception as exc:
         return _mark_transaction_report_failed(
             report_id=report.id,
             reason=str(exc),
-        )
-
-    with db_transaction.atomic():
-        completed_report = (
-            TransactionReport.objects.select_for_update()
-            .filter(id=report.id)
-            .first()
-        )
-        if completed_report is None:
-            raise TransactionValidationError("Transaction report does not exist.")
-
-        completed_report.status = TransactionReport.Status.COMPLETED
-        completed_report.completed_at = timezone.now()
-        completed_report.failure_reason = ""
-        completed_report.content_type = "application/pdf"
-        completed_report.pdf_content = pdf_content
-        completed_report.save(
-            update_fields=[
-                "status",
-                "completed_at",
-                "failure_reason",
-                "content_type",
-                "pdf_content",
-            ]
+            storage_key_to_delete=storage_key,
         )
 
     log_event(
@@ -143,6 +163,10 @@ def process_transaction_report(*, report_id: int) -> TransactionReport:
         date_from=str(completed_report.date_from),
         date_to=str(completed_report.date_to),
         status=completed_report.status,
+    )
+    record_transaction_report_event(
+        event="completed",
+        duration_seconds=_report_generation_duration_seconds(report=completed_report),
     )
     return completed_report
 
@@ -159,8 +183,12 @@ def _mark_transaction_report_failed(
     *,
     report_id: int,
     reason: str,
+    storage_key_to_delete: str = "",
 ) -> TransactionReport:
     """Persist one failed report generation result."""
+
+    if storage_key_to_delete:
+        _delete_transaction_report_pdf(storage_key=storage_key_to_delete)
 
     with db_transaction.atomic():
         report = (
@@ -174,12 +202,14 @@ def _mark_transaction_report_failed(
         report.status = TransactionReport.Status.FAILED
         report.completed_at = timezone.now()
         report.failure_reason = reason[:2000]
+        report.storage_key = ""
         report.pdf_content = None
         report.save(
             update_fields=[
                 "status",
                 "completed_at",
                 "failure_reason",
+                "storage_key",
                 "pdf_content",
             ]
         )
@@ -194,6 +224,10 @@ def _mark_transaction_report_failed(
         status=report.status,
         failure_reason=report.failure_reason,
     )
+    record_transaction_report_event(
+        event="failed",
+        duration_seconds=_report_generation_duration_seconds(report=report),
+    )
     return report
 
 
@@ -201,6 +235,124 @@ def _build_report_filename(*, user_id: int, date_from, date_to) -> str:
     """Build a deterministic PDF filename for one report request."""
 
     return f"transaction-report-user-{user_id}-{date_from}-{date_to}.pdf"
+
+
+def build_transaction_report_download_token(*, report: TransactionReport) -> str:
+    """Build a time-limited download token for one completed report."""
+
+    return signing.dumps(
+        {
+            "report_id": report.id,
+            "user_id": report.user_id,
+        },
+        salt=REPORT_DOWNLOAD_TOKEN_SALT,
+    )
+
+
+def validate_transaction_report_download_token(*, report_id: int, token: str) -> bool:
+    """Validate one temporary download token for a report."""
+
+    if not token:
+        return False
+
+    try:
+        payload = signing.loads(
+            token,
+            salt=REPORT_DOWNLOAD_TOKEN_SALT,
+            max_age=settings.TRANSACTION_REPORT_DOWNLOAD_URL_TTL_SECONDS,
+        )
+    except signing.BadSignature:
+        return False
+    return payload.get("report_id") == report_id
+
+
+def report_has_downloadable_artifact(*, report: TransactionReport) -> bool:
+    """Return whether one report has a stored file or legacy inline payload."""
+
+    return bool(report.storage_key or report.pdf_content)
+
+
+def open_transaction_report_file(*, report: TransactionReport):
+    """Open the stored PDF file for one completed report."""
+
+    if not report.storage_key:
+        return None
+    return _get_transaction_report_storage().open(report.storage_key, "rb")
+
+
+def build_transaction_report_storage_download_url(
+    *,
+    report: TransactionReport,
+) -> Optional[str]:
+    """Return a temporary storage-native URL when the backend supports it."""
+
+    if not report.storage_key:
+        return None
+
+    storage = _get_transaction_report_storage()
+    try:
+        return storage.url(
+            report.storage_key,
+            parameters={
+                "ResponseContentType": report.content_type or "application/pdf",
+                "ResponseContentDisposition": (
+                    "attachment; "
+                    f'filename="{report.file_name or f"transaction-report-{report.id}.pdf"}"'
+                ),
+            },
+            expire=settings.TRANSACTION_REPORT_DOWNLOAD_URL_TTL_SECONDS,
+        )
+    except TypeError:
+        return None
+
+
+def _store_transaction_report_pdf(*, report: TransactionReport, pdf_content: bytes) -> str:
+    """Persist one generated PDF into the configured report storage."""
+
+    storage_key = _build_report_storage_key(report=report)
+    storage = _get_transaction_report_storage()
+    if storage.exists(storage_key):
+        storage.delete(storage_key)
+    return storage.save(storage_key, ContentFile(pdf_content))
+
+
+def _delete_transaction_report_pdf(*, storage_key: str) -> None:
+    """Delete one stored transaction report PDF when cleanup is needed."""
+
+    storage = _get_transaction_report_storage()
+    if storage.exists(storage_key):
+        storage.delete(storage_key)
+
+
+def _build_report_storage_key(*, report: TransactionReport) -> str:
+    """Build a deterministic storage key for one generated report artifact."""
+
+    return posixpath.join(
+        f"user-{report.user_id}",
+        f"report-{report.id}",
+        report.file_name or _build_report_filename(
+            user_id=report.user_id,
+            date_from=report.date_from,
+            date_to=report.date_to,
+        ),
+    )
+
+
+def _get_transaction_report_storage():
+    """Return the configured storage backend for generated transaction reports."""
+
+    return storages["transaction_reports"]
+
+
+def _report_generation_duration_seconds(*, report: TransactionReport) -> float:
+    """Return one report generation duration from processing start to completion."""
+
+    if report.processing_started_at is None or report.completed_at is None:
+        return 0.0
+    return max(
+        (report.completed_at - report.processing_started_at).total_seconds(),
+        0.0,
+    )
 
 
 def _render_transaction_report_pdf(*, report: TransactionReport, summary: dict, transactions) -> bytes:

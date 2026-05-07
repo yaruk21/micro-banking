@@ -7,12 +7,13 @@ from drf_spectacular.views import (
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 
-from .views import health_check
+from .views import health_check, metrics_view
 from apps.accounts.views import RegisterView, TokenObtainPairThrottledView
 
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("health/", health_check, name="health-check"),
+    path("metrics/", metrics_view, name="metrics"),
     path("api/register/", RegisterView.as_view(), name="register"),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(

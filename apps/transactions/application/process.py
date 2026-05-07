@@ -9,6 +9,7 @@ from apps.accounts.services import get_or_create_system_account
 from apps.accounts.models import Account
 from apps.transactions.models import Transaction
 from apps.transactions.realtime import publish_transaction_status_update
+from core.metrics import record_transaction_result
 from core.structured_logging import log_event
 
 from .cache_versions import (
@@ -159,6 +160,12 @@ def process_transfer(*, transaction_id: int) -> Transaction:
     if fee_account is not None:
         refresh_account_balance_cache(account=fee_account)
     publish_transaction_status_update(transaction_id=transfer.id)
+    record_transaction_result(
+        transfer_type=transfer.transfer_type,
+        status=transfer.status,
+        amount=transfer.amount,
+        duration_seconds=_processing_duration_seconds(transfer=transfer),
+    )
     return transfer
 
 
@@ -187,4 +194,21 @@ def _fail_transfer(*, transfer: Transaction, reason: str) -> Transaction:
         failure_reason=reason,
     )
     publish_transaction_status_update(transaction_id=transfer.id)
+    record_transaction_result(
+        transfer_type=transfer.transfer_type,
+        status=transfer.status,
+        amount=transfer.amount,
+        duration_seconds=_processing_duration_seconds(transfer=transfer),
+    )
     return transfer
+
+
+def _processing_duration_seconds(*, transfer: Transaction) -> float:
+    """Return processing duration from the recorded processing start time."""
+
+    if transfer.processing_started_at is None or transfer.completed_at is None:
+        return 0.0
+    return max(
+        (transfer.completed_at - transfer.processing_started_at).total_seconds(),
+        0.0,
+    )

@@ -1,9 +1,13 @@
+import shutil
+import tempfile
 from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.core.cache import cache
+from django.core.files.storage import storages
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -1320,6 +1324,24 @@ class TransactionReportServiceTests(TestCase):
         """Create baseline users and accounts for report generation."""
 
         cache.clear()
+        self.report_storage_dir = tempfile.mkdtemp()
+        report_storage_override = override_settings(
+            STORAGES={
+                **settings.STORAGES,
+                "transaction_reports": {
+                    "BACKEND": "django.core.files.storage.FileSystemStorage",
+                    "OPTIONS": {
+                        "location": self.report_storage_dir,
+                        "base_url": "/media/transaction-reports/",
+                    },
+                },
+            }
+        )
+        report_storage_override.enable()
+        storages._storages.clear()
+        self.addCleanup(report_storage_override.disable)
+        self.addCleanup(storages._storages.clear)
+        self.addCleanup(shutil.rmtree, self.report_storage_dir, ignore_errors=True)
         self.user = User.objects.create_user(
             username="report-alice",
             password="pass123",
@@ -1334,7 +1356,7 @@ class TransactionReportServiceTests(TestCase):
         self,
         mock_dispatch_report,
     ):
-        """Processing a pending report should persist a completed PDF payload."""
+        """Processing a pending report should persist a completed stored PDF."""
 
         from_account = Account.objects.create(
             owner=self.user,
@@ -1375,5 +1397,7 @@ class TransactionReportServiceTests(TestCase):
         self.assertEqual(generated_report.status, TransactionReport.Status.COMPLETED)
         self.assertEqual(report.content_type, "application/pdf")
         self.assertTrue(report.file_name.endswith(".pdf"))
-        self.assertTrue(report.pdf_content.startswith(b"%PDF-1.4"))
+        self.assertTrue(report.storage_key)
+        self.assertIsNone(report.pdf_content)
+        self.assertTrue(storages["transaction_reports"].exists(report.storage_key))
         mock_dispatch_report.assert_not_called()
